@@ -1,0 +1,151 @@
+// flexencoder_xidx.cpp - Backend-agnostic xidx writer implementation
+
+#include "flexencoder_xidx.hpp"
+#include <cstring>
+#include <iostream>
+
+namespace fs = std::filesystem;
+
+namespace {
+
+// Packed on-disk layout for one token record (32 bytes).
+struct XidxTokenRecord {
+    std::uint64_t corpus_pos;  // FlexToken.global_pos (0-based)
+    std::uint32_t doc_idx;     // index into docs.tbl
+    std::uint64_t xml_start;   // byte offset in XML file
+    std::uint64_t xml_end;
+    std::uint32_t tok_id_idx;  // index into tok_ids.tbl, or 0xFFFFFFFF
+};
+
+// Packed on-disk layout for one region record (40 bytes).
+struct XidxRegionRecord {
+    std::uint32_t region_type_idx; // index into region_types.tbl
+    std::uint32_t doc_idx;         // index into docs.tbl
+    std::uint64_t seq_id;          // FlexRegion.seq_id (or 0)
+    std::uint64_t start_pos;       // first corpus_pos in region (inclusive)
+    std::uint64_t end_pos;         // last corpus_pos in region (inclusive)
+    std::uint32_t region_id_idx;   // index into region_ids.tbl, or 0xFFFFFFFF
+    std::uint32_t reserved;        // padding / future use
+};
+
+static void write_record(std::ofstream& out, const void* rec, std::size_t size) {
+    out.write(reinterpret_cast<const char*>(rec), static_cast<std::streamsize>(size));
+}
+
+} // namespace
+
+XidxWriter::XidxWriter(const std::string& project_root)
+    : project_root_(project_root) {}
+
+void XidxWriter::begin_corpus(const FlexConfig& cfg) {
+    (void)cfg;
+    fs::path root(project_root_.empty() ? "." : project_root_);
+    if (!root.is_absolute()) {
+        root = fs::absolute(root);
+    }
+    xidx_dir_ = root / "xidx";
+    fs::create_directories(xidx_dir_);
+
+    tokens_bin_.open(xidx_dir_ / "tokens.bin", std::ios::binary | std::ios::trunc);
+    regions_bin_.open(xidx_dir_ / "regions.bin", std::ios::binary | std::ios::trunc);
+    docs_tbl_.open(xidx_dir_ / "docs.tbl", std::ios::binary | std::ios::trunc);
+    tok_ids_tbl_.open(xidx_dir_ / "tok_ids.tbl", std::ios::binary | std::ios::trunc);
+    region_types_tbl_.open(xidx_dir_ / "region_types.tbl", std::ios::binary | std::ios::trunc);
+    region_ids_tbl_.open(xidx_dir_ / "region_ids.tbl", std::ios::binary | std::ios::trunc);
+
+    if (!tokens_bin_ || !regions_bin_ || !docs_tbl_ || !tok_ids_tbl_ || !region_types_tbl_ || !region_ids_tbl_) {
+        std::cerr << "[flexencoder] XidxWriter: failed to open xidx output files under "
+                  << xidx_dir_.string() << std::endl;
+    }
+}
+
+std::uint32_t XidxWriter::intern_doc(const std::string& rel_path) {
+    auto it = doc_index_.find(rel_path);
+    if (it != doc_index_.end()) return it->second;
+    std::uint32_t idx = static_cast<std::uint32_t>(doc_index_.size());
+    doc_index_[rel_path] = idx;
+    docs_tbl_ << rel_path << "\n";
+    return idx;
+}
+
+std::uint32_t XidxWriter::intern_tok_id(const std::string& tok_id) {
+    if (tok_id.empty()) return INVALID_INDEX;
+    auto it = tok_id_index_.find(tok_id);
+    if (it != tok_id_index_.end()) return it->second;
+    std::uint32_t idx = static_cast<std::uint32_t>(tok_id_index_.size());
+    tok_id_index_[tok_id] = idx;
+    tok_ids_tbl_ << tok_id << "\n";
+    return idx;
+}
+
+std::uint32_t XidxWriter::intern_region_type(const std::string& type) {
+    auto it = region_type_index_.find(type);
+    if (it != region_type_index_.end()) return it->second;
+    std::uint32_t idx = static_cast<std::uint32_t>(region_type_index_.size());
+    region_type_index_[type] = idx;
+    region_types_tbl_ << type << "\n";
+    return idx;
+}
+
+std::uint32_t XidxWriter::intern_region_id(const std::string& id) {
+    if (id.empty()) return INVALID_INDEX;
+    auto it = region_id_index_.find(id);
+    if (it != region_id_index_.end()) return it->second;
+    std::uint32_t idx = static_cast<std::uint32_t>(region_id_index_.size());
+    region_id_index_[id] = idx;
+    region_ids_tbl_ << id << "\n";
+    return idx;
+}
+
+void XidxWriter::begin_document(const FlexDocumentMeta& doc) {
+    // Store document path relative to project_root so PHP / flexicorp can resolve it.
+    fs::path abs_path = fs::path(doc.path);
+    if (!abs_path.is_absolute()) {
+        abs_path = fs::path(project_root_) / abs_path;
+    }
+    abs_path = fs::canonical(abs_path);
+    fs::path root(project_root_.empty() ? "." : project_root_);
+    if (!root.is_absolute()) root = fs::absolute(root);
+    root = fs::canonical(root);
+
+    std::string rel = abs_path.lexically_relative(root).string();
+    current_doc_idx_ = intern_doc(rel);
+}
+
+void XidxWriter::add_token(const FlexToken& tok) {
+    if (!tokens_bin_) return;
+    XidxTokenRecord rec;
+    rec.corpus_pos = tok.global_pos;
+    rec.doc_idx = current_doc_idx_;
+    rec.xml_start = tok.xml_start;
+    rec.xml_end = tok.xml_end;
+    rec.tok_id_idx = intern_tok_id(tok.tok_id);
+    write_record(tokens_bin_, &rec, sizeof(rec));
+}
+
+void XidxWriter::add_region(const FlexRegion& reg) {
+    if (!regions_bin_) return;
+    XidxRegionRecord rec;
+    rec.region_type_idx = intern_region_type(reg.type);
+    rec.doc_idx = current_doc_idx_;
+    rec.seq_id = reg.seq_id;
+    rec.start_pos = reg.start_pos;
+    rec.end_pos = reg.end_pos;
+    rec.region_id_idx = intern_region_id(reg.id);
+    rec.reserved = 0;
+    write_record(regions_bin_, &rec, sizeof(rec));
+}
+
+void XidxWriter::end_document(const FlexDocumentMeta& doc) {
+    (void)doc;
+}
+
+void XidxWriter::end_corpus() {
+    tokens_bin_.close();
+    regions_bin_.close();
+    docs_tbl_.close();
+    tok_ids_tbl_.close();
+    region_types_tbl_.close();
+    region_ids_tbl_.close();
+}
+
