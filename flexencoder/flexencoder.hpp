@@ -29,6 +29,8 @@ struct FlexConfig {
     std::string settings_path;  // tmp/cqpsettings.xml or Resources/settings.xml
     std::string searchfolder;   // e.g. "xmlfiles"
     bool verbose{false};        // print progress (file/doc/tokens) when set
+    /** Filled by FlexExtractor from /ttsettings/cqp/@wordfld (default form). Used by backends for surface string column. */
+    std::string wordfld;
 };
 
 struct FlexDocumentMeta {

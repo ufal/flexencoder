@@ -36,6 +36,7 @@ ClickHouseWriter::ClickHouseWriter(const std::string& output_dir,
 
 void ClickHouseWriter::begin_corpus(const FlexConfig& cfg) {
     project_root_ = cfg.project_root.empty() ? "." : cfg.project_root;
+    wordfld_ = cfg.wordfld.empty() ? "form" : cfg.wordfld;
     doc_id_ = 0;
     sentence_id_ = 0;
     tok_pos_ = 0;
@@ -298,9 +299,14 @@ void ClickHouseWriter::end_document(const FlexDocumentMeta& doc) {
             if (br.reg.start_pos <= global_pos && global_pos <= br.reg.end_pos)
                 region_ids.push_back(br.region_id);
         }
-        std::string form = bt.tok.attrs.count("form") ? bt.tok.attrs.at("form") : (bt.tok.attrs.count("word") ? bt.tok.attrs.at("word") : "");
+        std::string form;
+        {
+            auto it = bt.tok.attrs.find(wordfld_);
+            if (it == bt.tok.attrs.end()) it = bt.tok.attrs.find("word");
+            if (it != bt.tok.attrs.end()) form = it->second;
+        }
         std::string lemma = bt.tok.attrs.count("lemma") ? bt.tok.attrs.at("lemma") : "";
-        std::string upos = bt.tok.attrs.count("upos") ? bt.tok.attrs.at("upos") : (bt.tok.attrs.count("pos") ? bt.tok.attrs.at("pos") : "");
+        std::string upos = bt.tok.attrs.count("upos") ? bt.tok.attrs.at("upos") : "";
         std::map<std::string, std::string> feats;
         if (bt.tok.attrs.count("feats")) {
             std::string f = bt.tok.attrs.at("feats");

@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <string>
 
 namespace fs = std::filesystem;
 
@@ -129,6 +130,20 @@ void PandoEventsWriter::write_token_event(const FlexToken& tok) {
         }
     }
     out_ << '}';
+
+    // Remaining keys from cqpsettings pattributes (same values as CWB extraction).
+    for (const auto& kv : tok.attrs) {
+        const std::string& k = kv.first;
+        if (k == "inner_text") continue;
+        if (k.rfind("feats_", 0) == 0 && k.size() > 6) continue;
+        if (k == "form" || k == "lemma" || k == "upos" || k == "xpos") continue;
+        if (k == "deprel" || k == "dep") continue;
+        if (k == "head" || k == "head_id" || k == "gov") continue;
+        out_ << ',';
+        write_json_string(k);
+        out_ << ':';
+        write_json_string(kv.second);
+    }
 
     out_ << "}\n";
 }

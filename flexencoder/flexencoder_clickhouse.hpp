@@ -25,6 +25,8 @@ private:
     std::string output_dir_;
     std::string sentence_region_type_;
     std::string project_root_;
+    /** cqp @wordfld — which indexed pattribute name holds the surface form for the toks.form column. */
+    std::string wordfld_;
 
     std::uint64_t doc_id_{0};
     std::uint64_t sentence_id_{0};

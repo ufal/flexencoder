@@ -1,5 +1,6 @@
 // flexencoder_extractor.cpp - TEITOK XML reader / extractor (token + region events)
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <filesystem>
@@ -26,6 +27,42 @@ std::string xpath_escape_id(const std::string& id) {
         else out += c;
     }
     return out;
+}
+
+// Token id refs from sameAs/corresp: "#w-1 #w-2", commas, or full URIs with fragment.
+inline void append_ref_ids_from_toklist_string(const std::string& wlist, std::vector<std::string>* out) {
+    if (!out) return;
+    std::string norm = wlist;
+    for (char& c : norm) {
+        if (c == ',' || c == '\t' || c == '\n' || c == '\r') c = ' ';
+    }
+    for (std::string::size_type i = 0; i < norm.size();) {
+        while (i < norm.size() && (norm[i] == ' ' || norm[i] == '#')) ++i;
+        std::string::size_type start = i;
+        while (i < norm.size() && norm[i] != ' ' && norm[i] != '#') ++i;
+        if (start < i) {
+            std::string tok = norm.substr(start, i - start);
+            const std::size_t hash = tok.find_last_of('#');
+            if (hash != std::string::npos && hash + 1 < tok.size()) tok = tok.substr(hash + 1);
+            if (!tok.empty()) out->push_back(std::move(tok));
+        }
+    }
+}
+
+// Min/max corpus_pos over referenced token ids, or (0,0) if any id missing.
+inline std::pair<std::uint64_t, std::uint64_t> pos_span_from_tok_ref_ids(
+    const std::vector<std::string>& ref_ids,
+    const std::map<std::string, std::uint64_t>& id_pos
+) {
+    std::uint64_t mn = 0, mx = 0;
+    for (const auto& rid : ref_ids) {
+        auto it = id_pos.find(rid);
+        if (it == id_pos.end()) return {0, 0};
+        if (mn == 0 || it->second < mn) mn = it->second;
+        if (it->second > mx) mx = it->second;
+    }
+    if (mn == 0 || mx == 0) return {0, 0};
+    return {mn, mx};
 }
 
 // Resolve one sattribute value via xpath/external lookup (mirrors tt-cwb-encode).
@@ -225,6 +262,7 @@ void FlexExtractor::load_settings() {
         if (ttroot && ttroot.attribute("verbose")) {
             cfg_.verbose = true;
         }
+        cfg_.wordfld = wordfld_;
     }
     pugi::xml_node xmlfile = xmlsettings_->select_node("//xmlfile").node();
     if (xmlfile && xmlfile.attribute("nospace")) {
@@ -263,21 +301,30 @@ void FlexExtractor::load_pattributes() {
     pugi::xml_node pattrs = cqp.child("pattributes");
     if (!pattrs) return;
 
-    if (pattrs.select_nodes("item[@key=\"word\"]").empty()) {
-        pugi::xml_node watt = pattrs.append_child("item");
-        watt.append_attribute("key") = "word";
-    }
-    if (pattrs.select_nodes("item[@key=\"id\"]").empty()) {
-        pugi::xml_node watt = pattrs.append_child("item");
-        watt.append_attribute("key") = "id";
-    }
-
+    // Index keys and XPath values come only from cqpsettings (same as tt-cwb-encode).
+    // Do not append to the loaded XML document — that silently rewrote settings in memory.
     for (pugi::xml_node item = pattrs.child("item"); item; item = item.next_sibling("item")) {
         PAttribute pa;
         pa.key = item.attribute("key").value();
         if (pa.key.empty()) continue;
         if (item.attribute("xpath")) pa.xpath = item.attribute("xpath").value();
         if (item.attribute("type")) pa.type = item.attribute("type").value();
+        pattrs_.push_back(std::move(pa));
+    }
+
+    // Optional legacy defaults in the in-memory list only (mirrors CwbWriter::begin_corpus).
+    auto has_key = [](const std::vector<PAttribute>& v, const char* k) {
+        return std::find_if(v.begin(), v.end(),
+                            [k](const PAttribute& p) { return p.key == k; }) != v.end();
+    };
+    if (!has_key(pattrs_, "word")) {
+        PAttribute pa;
+        pa.key = "word";
+        pattrs_.insert(pattrs_.begin(), std::move(pa));
+    }
+    if (!has_key(pattrs_, "id")) {
+        PAttribute pa;
+        pa.key = "id";
         pattrs_.push_back(std::move(pa));
     }
 }
@@ -447,6 +494,7 @@ void FlexExtractor::treat_file(
         tok.doc_pos = ++doc_pos;
         tok.xml_start = xml_start;
         tok.xml_end = xml_end;
+        // Values: direct attribute on <tok> (etc.) or xpath relative to the token node — from cqpsettings only.
         for (const auto& pa : pattrs_) {
             std::string formval;
             if (!pa.xpath.empty()) {
@@ -587,20 +635,44 @@ void FlexExtractor::treat_file(
         if (sa.empty_) {
             for (auto const& xn : nodes) {
                 pugi::xml_node el = xn.node();
-                pugi::xpath_node prev_tok = el.select_node("preceding::tok[1]");
-                if (!prev_tok.node()) prev_tok = el.select_node("preceding::dtok[1]");
-                std::uint64_t pos = 0;
-                if (prev_tok.node()) {
-                    std::string pid = prev_tok.node().attribute("id").value();
-                    auto it = id_pos.find(pid);
-                    if (it != id_pos.end()) pos = it->second;
+                std::uint64_t posa = 0, posb = 0;
+                const char* toklist_attr = sa.toklist.empty() ? "sameAs" : sa.toklist.c_str();
+                std::string wlist;
+                if (el.attribute(toklist_attr)) wlist = el.attribute(toklist_attr).value();
+                if (wlist.empty() && std::string(toklist_attr) == "sameAs" && el.attribute("corresp")) {
+                    wlist = el.attribute("corresp").value();
+                }
+                if (!wlist.empty()) {
+                    std::vector<std::string> ref_ids;
+                    append_ref_ids_from_toklist_string(wlist, &ref_ids);
+                    if (!ref_ids.empty()) {
+                        auto span = pos_span_from_tok_ref_ids(ref_ids, id_pos);
+                        if (span.first && span.second) {
+                            posa = span.first;
+                            posb = span.second;
+                        }
+                    }
+                }
+                if (posa == 0 && posb == 0) {
+                    pugi::xpath_node prev_tok = el.select_node("preceding::tok[1]");
+                    if (!prev_tok.node()) prev_tok = el.select_node("preceding::dtok[1]");
+                    std::uint64_t pos = 0;
+                    if (prev_tok.node()) {
+                        std::string pid = prev_tok.node().attribute("id").value();
+                        if (pid.empty()) pid = prev_tok.node().attribute("xml:id").value();
+                        auto it = id_pos.find(pid);
+                        if (it != id_pos.end()) pos = it->second;
+                    }
+                    if (pos == 0) continue;
+                    posa = posb = pos;
                 }
                 FlexRegion reg;
                 reg.doc_id = doc_id;
                 reg.type = sa.key;
                 reg.id = el.attribute("id").value();
-                reg.start_pos = pos;
-                reg.end_pos = pos;
+                if (reg.id.empty()) reg.id = el.attribute("xml:id").value();
+                reg.start_pos = posa;
+                reg.end_pos = posb;
                 for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att)
                     reg.attrs[att->name()] = att->value();
                 int off = el.offset_debug();
@@ -628,30 +700,31 @@ void FlexExtractor::treat_file(
             } else {
                 const char* toklist_attr = sa.toklist.empty() ? "sameAs" : sa.toklist.c_str();
                 std::string toka, tokb;
-                if (el.attribute(toklist_attr)) {
-                    std::string wlist = el.attribute(toklist_attr).value();
-                    if (!wlist.empty()) {
-                        std::vector<std::string> ref_ids;
-                        for (std::string::size_type i = 0; i < wlist.size(); ) {
-                            while (i < wlist.size() && (wlist[i] == ' ' || wlist[i] == '#')) ++i;
-                            std::string::size_type start = i;
-                            while (i < wlist.size() && wlist[i] != ' ' && wlist[i] != '#') ++i;
-                            if (start < i) ref_ids.push_back(wlist.substr(start, i - start));
-                        }
-                        if (!ref_ids.empty()) {
-                            std::uint64_t mn = 0, mx = 0;
-                            for (const auto& rid : ref_ids) {
-                                auto it = id_pos.find(rid);
-                                if (it == id_pos.end()) { mn = mx = 0; break; }
-                                if (mn == 0 || it->second < mn) mn = it->second;
-                                if (it->second > mx) mx = it->second;
-                            }
-                            if (mn && mx) { posa = mn; posb = mx; }
+                std::string wlist;
+                if (el.attribute(toklist_attr)) wlist = el.attribute(toklist_attr).value();
+                if (wlist.empty() && std::string(toklist_attr) == "sameAs" && el.attribute("corresp")) {
+                    wlist = el.attribute("corresp").value();
+                }
+                if (!wlist.empty()) {
+                    std::vector<std::string> ref_ids;
+                    append_ref_ids_from_toklist_string(wlist, &ref_ids);
+                    if (!ref_ids.empty()) {
+                        auto span = pos_span_from_tok_ref_ids(ref_ids, id_pos);
+                        if (span.first && span.second) {
+                            posa = span.first;
+                            posb = span.second;
                         }
                     }
                 }
                 if (posa == 0 && posb == 0) {
                     pugi::xpath_node_set rel_toks = el.select_nodes(tmpxpath.c_str());
+                    // Oral <u> / wrappers often contain only <dtok> or <mtok>; default tmpxpath is .//tok.
+                    if (rel_toks.empty() && !use_tok_span) {
+                        rel_toks = el.select_nodes(".//dtok");
+                    }
+                    if (rel_toks.empty() && !use_tok_span) {
+                        rel_toks = el.select_nodes(".//mtok");
+                    }
                     if (rel_toks.empty()) continue;
                     toka = rel_toks[0].node().attribute("id").value();
                     tokb = rel_toks[rel_toks.size() - 1].node().attribute("id").value();

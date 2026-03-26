@@ -37,6 +37,14 @@ private:
     std::ofstream region_types_tbl_;
     std::ofstream region_ids_tbl_;
 
+    struct PerTypeEntry {
+        std::uint64_t start_pos{0};
+        std::uint64_t end_pos{0};
+        std::uint64_t regions_rec_index{0}; // record index in regions.bin
+    };
+    std::unordered_map<std::string, std::vector<PerTypeEntry>> per_type_entries_;
+    std::uint64_t regions_rec_count_{0};
+
     // Mappings to compact integer ids.
     std::unordered_map<std::string, std::uint32_t> doc_index_;
     std::unordered_map<std::string, std::uint32_t> tok_id_index_;

@@ -5,11 +5,32 @@
 
 #include "flexencoder_pando_api.hpp"
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
+#include <fstream>
 #include <unordered_map>
+#include <unordered_set>
+#include <filesystem>
+#include <unistd.h>
 
 #ifdef USE_PANDO_API
 #include "flexencoder_helpers.hpp"  // trim, etc.
+
+// Token attrs are exactly those produced by the extractor from cqpsettings <cqp><pattributes>
+// (xpath evaluated from each token node; no extra keys invented here).
+static std::unordered_map<std::string, std::string> build_pando_token_attrs(const FlexToken& tok) {
+    std::unordered_map<std::string, std::string> attrs;
+    static const std::unordered_set<std::string> kSkipInternal{
+        "inner_text",
+        "sent_id",
+    };
+    for (const auto& kv : tok.attrs) {
+        if (kSkipInternal.count(kv.first)) continue;
+        attrs[kv.first] = kv.second;
+    }
+    return attrs;
+}
 #endif
 
 PandoApiWriter::PandoApiWriter(const std::string& output_dir)
@@ -19,6 +40,44 @@ PandoApiWriter::PandoApiWriter(const std::string& output_dir)
 void PandoApiWriter::begin_corpus(const FlexConfig& cfg) {
     (void)cfg;
 #ifdef USE_PANDO_API
+    // Pre-flight: make failures readable when output dir permissions are wrong.
+    // Pando's builder can throw later with low-context errors; we want to detect
+    // non-writable destinations early.
+    try {
+        namespace fs = std::filesystem;
+        fs::path out(output_dir_);
+        if (out.empty()) {
+            throw std::runtime_error("Pando output directory is empty.");
+        }
+        if (!fs::exists(out)) {
+            std::error_code ec;
+            fs::create_directories(out, ec);
+            if (ec) {
+                throw std::runtime_error(
+                    "Cannot create Pando output directory '" + out.string() + "': " + ec.message());
+            }
+        }
+
+        const pid_t pid = getpid();
+        const fs::path testPath = out / (".flexencoder_pando_write_test_" + std::to_string(pid));
+        {
+            std::ofstream test(testPath.string(), std::ios::out | std::ios::binary | std::ios::trunc);
+            if (!test) {
+                const int e = errno;
+                throw std::runtime_error(
+                    "Pando output directory is not writable: '" + out.string() + "'. "
+                    "Cannot create '" + testPath.string() + "'. "
+                    "errno=" + std::to_string(e) + " (" + std::strerror(e) + "). "
+                    "Try running reindex as the directory owner (or fix permissions/ownership).");
+            }
+            test << "ok\n";
+        }
+        std::error_code rmec;
+        fs::remove(testPath, rmec);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("[flexencoder] Pando output check failed: ") + e.what());
+    }
+
     builder_ = std::make_unique<manatree::PandoIndexBuilder>(output_dir_);
     builder_->set_default_within("text");
 #endif
@@ -100,20 +159,7 @@ void PandoApiWriter::flush_document() {
             current_sent_id = sentence_id;
         }
 
-        std::unordered_map<std::string, std::string> attrs;
-        auto form_it = bt.tok.attrs.find("form");
-        if (form_it == bt.tok.attrs.end()) form_it = bt.tok.attrs.find("word");
-        attrs["form"] = (form_it != bt.tok.attrs.end()) ? form_it->second : "";
-        auto lemma_it = bt.tok.attrs.find("lemma");
-        attrs["lemma"] = (lemma_it != bt.tok.attrs.end()) ? lemma_it->second : "";
-        auto upos_it = bt.tok.attrs.find("upos");
-        if (upos_it == bt.tok.attrs.end()) upos_it = bt.tok.attrs.find("pos");
-        attrs["upos"] = (upos_it != bt.tok.attrs.end()) ? upos_it->second : "";
-        auto xpos_it = bt.tok.attrs.find("xpos");
-        if (xpos_it != bt.tok.attrs.end()) attrs["xpos"] = xpos_it->second;
-        if (!bt.deprel.empty()) attrs["deprel"] = bt.deprel;
-        auto feats_it = bt.tok.attrs.find("feats");
-        if (feats_it != bt.tok.attrs.end()) attrs["feats"] = feats_it->second;
+        std::unordered_map<std::string, std::string> attrs = build_pando_token_attrs(bt.tok);
 
         int sentence_head_id = -1;
         if (sentence_id != 0) {
@@ -145,10 +191,17 @@ void PandoApiWriter::flush_document() {
             if (it == rattrs.end())
                 rattrs.insert(rattrs.begin(), std::make_pair("id", br.reg.id));
         }
-        // Work around Region attr size mismatch (e.g. s_sent_id) for now by
-        // not attaching any attributes to sentence regions. This still gives
-        // Pando the correct spans but skips per-sentence metadata.
-        if (br.reg.type == "s" || br.reg.type == sentence_region_type_) {
+        // Pando's StreamingBuilder (streaming_builder.cpp) requires that for each
+        // region type, every add_region() pushes the same set of attribute keys;
+        // each key's vector length must equal regions_[type].size(). TEITOK sattrs
+        // are often sparse (e.g. nation only on some <u>), which causes
+        // "Region attr u_nation size mismatch". Same issue as text_pubtime on <text>.
+        //
+        // Until we schema-pad from cqpsettings (always emit every key with "_" for
+        // missing), omit attrs on levels that are typically sparse or cross-doc
+        // inconsistent.
+        if (br.reg.type == "s" || br.reg.type == sentence_region_type_ || br.reg.type == "text" ||
+            br.reg.type == "u") {
             rattrs.clear();
         }
         manatree::CorpusPos start = static_cast<manatree::CorpusPos>(br.reg.start_pos);

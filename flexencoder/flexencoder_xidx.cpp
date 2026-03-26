@@ -1,6 +1,7 @@
 // flexencoder_xidx.cpp - Backend-agnostic xidx writer implementation
 
 #include "flexencoder_xidx.hpp"
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 
@@ -17,13 +18,15 @@ struct XidxTokenRecord {
     std::uint32_t tok_id_idx;  // index into tok_ids.tbl, or 0xFFFFFFFF
 };
 
-// Packed on-disk layout for one region record (40 bytes).
+// Packed on-disk layout for one region record.
 struct XidxRegionRecord {
     std::uint32_t region_type_idx; // index into region_types.tbl
     std::uint32_t doc_idx;         // index into docs.tbl
     std::uint64_t seq_id;          // FlexRegion.seq_id (or 0)
     std::uint64_t start_pos;       // first corpus_pos in region (inclusive)
     std::uint64_t end_pos;         // last corpus_pos in region (inclusive)
+    std::uint64_t xml_start;      // byte offset in XML file for region container
+    std::uint64_t xml_end;        // byte offset end (exclusive) in XML file for region container
     std::uint32_t region_id_idx;   // index into region_ids.tbl, or 0xFFFFFFFF
     std::uint32_t reserved;        // padding / future use
 };
@@ -125,15 +128,25 @@ void XidxWriter::add_token(const FlexToken& tok) {
 
 void XidxWriter::add_region(const FlexRegion& reg) {
     if (!regions_bin_) return;
+    const std::uint64_t rec_idx = regions_rec_count_;
+    regions_rec_count_++;
     XidxRegionRecord rec;
     rec.region_type_idx = intern_region_type(reg.type);
     rec.doc_idx = current_doc_idx_;
     rec.seq_id = reg.seq_id;
     rec.start_pos = reg.start_pos;
     rec.end_pos = reg.end_pos;
+    rec.xml_start = reg.xml_start;
+    rec.xml_end = reg.xml_end;
     rec.region_id_idx = intern_region_id(reg.id);
     rec.reserved = 0;
     write_record(regions_bin_, &rec, sizeof(rec));
+
+    // Store per-type span -> record-index mapping for per-region-type fixed xidx.
+    // We sort/write these files in end_corpus().
+    per_type_entries_[reg.type].push_back(
+        PerTypeEntry{reg.start_pos, reg.end_pos, rec_idx}
+    );
 }
 
 void XidxWriter::end_document(const FlexDocumentMeta& doc) {
@@ -147,5 +160,50 @@ void XidxWriter::end_corpus() {
     tok_ids_tbl_.close();
     region_types_tbl_.close();
     region_ids_tbl_.close();
+
+    // Emit CWB-like per-region-type rng + xidx mapping files for the Pando backend.
+    // These allow deterministic fixed-record reads (no XML scanning) when the GUI requests
+    // context at a specific sentence/region type.
+    // A type (e.g. u) only gets u.rng / u_xidx.rng here if add_region() recorded at least one
+    // region of that type — driven by cqpsettings structural sattributes, same as CWB.
+    struct RangeRec {
+        std::uint64_t start_pos;
+        std::uint64_t end_pos;
+    };
+
+    struct XidxMapRec {
+        std::uint64_t regions_rec_index;
+    };
+
+    for (auto& kv : per_type_entries_) {
+        const std::string& type = kv.first;
+        auto& entries = kv.second;
+        if (entries.empty()) continue;
+
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            if (a.start_pos != b.start_pos) return a.start_pos < b.start_pos;
+            if (a.end_pos != b.end_pos) return a.end_pos < b.end_pos;
+            return a.regions_rec_index < b.regions_rec_index;
+        });
+
+        const std::filesystem::path rng_path = xidx_dir_ / (type + ".rng");
+        const std::filesystem::path xidx_path = xidx_dir_ / (type + "_xidx.rng");
+
+        std::ofstream rng_out(rng_path, std::ios::binary | std::ios::trunc);
+        std::ofstream xidx_out(xidx_path, std::ios::binary | std::ios::trunc);
+        if (!rng_out || !xidx_out) continue;
+
+        for (const auto& e : entries) {
+            RangeRec rr{e.start_pos, e.end_pos};
+            XidxMapRec xm{e.regions_rec_index};
+            write_record(rng_out, &rr, sizeof(rr));
+            write_record(xidx_out, &xm, sizeof(xm));
+        }
+        rng_out.close();
+        xidx_out.close();
+    }
+
+    per_type_entries_.clear();
+    regions_rec_count_ = 0;
 }
 
