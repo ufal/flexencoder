@@ -28,6 +28,7 @@ public:
 
 private:
     std::string output_dir_;
+    FlexConfig cfg_snapshot_{};
 
 #ifdef USE_PANDO_API
     std::unique_ptr<manatree::PandoIndexBuilder> builder_;

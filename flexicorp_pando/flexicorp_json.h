@@ -67,7 +67,12 @@ inline std::string derive_project_root(const std::string& index_dir) {
     while (!p.empty() && p.back() == '/') p.pop_back();
     if (p.size() >= 6 && p.substr(p.size() - 6) == "/pando") return p.substr(0, p.size() - 6);
     auto slash = p.find_last_of('/');
-    if (slash == std::string::npos) return "";
+    if (slash == std::string::npos) {
+        // CLI often uses "--index-dir pando" from the TEITOK project directory; there is no
+        // path separator, so treat the current working directory as the project root (sibling xidx/).
+        if (p == "pando") return ".";
+        return "";
+    }
     return p.substr(0, slash);
 }
 

@@ -19,7 +19,10 @@ static void usage(const char* prog) {
         "Usage: %s [options] -q <query>\n\n"
         "Options:\n"
         "  -p, --project-root DIR   TEITOK project root (index at DIR/pando)\n"
+        "                           Default: . (CWD) when neither -p nor --index-dir is given.\n"
         "  --index-dir DIR          Explicit Pando index directory\n"
+        "                           If DIR is the bare name \"pando\", CWD is the project root\n"
+        "                           (expects ./xidx next to ./pando for XML fragments on hits).\n"
         "  -q, --query QUERY        CQL query string (required)\n"
         "  --offset N               Skip first N hits (default: 0)\n"
         "  --limit N                Max hits to return (default: 50)\n"
@@ -73,11 +76,8 @@ int main(int argc, char* argv[]) {
         usage(argv[0]);
         return 2;
     }
-    if (project_root.empty() && index_dir.empty()) {
-        std::fprintf(stderr, "Error: provide --project-root or --index-dir\n");
-        usage(argv[0]);
-        return 2;
-    }
+    // From a TEITOK project directory, `-p .` is redundant: use CWD as project root.
+    if (project_root.empty() && index_dir.empty()) project_root = ".";
 
     flexicorp_pando_ctx_t* ctx = flexicorp_pando_open(
         project_root.empty() ? nullptr : project_root.c_str(),

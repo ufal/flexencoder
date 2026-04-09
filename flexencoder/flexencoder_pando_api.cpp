@@ -38,7 +38,7 @@ PandoApiWriter::PandoApiWriter(const std::string& output_dir)
 }
 
 void PandoApiWriter::begin_corpus(const FlexConfig& cfg) {
-    (void)cfg;
+    cfg_snapshot_ = cfg;
 #ifdef USE_PANDO_API
     // Pre-flight: make failures readable when output dir permissions are wrong.
     // Pando's builder can throw later with low-context errors; we want to detect
@@ -94,6 +94,19 @@ void PandoApiWriter::begin_document(const FlexDocumentMeta& doc) {
 void PandoApiWriter::add_token(const FlexToken& tok) {
 #ifdef USE_PANDO_API
     if (tok.tok_id == "w-empty") return;
+    if (cfg_snapshot_.pando_del_tokens && flextoken_word_is_dash(tok, cfg_snapshot_.wordfld)) {
+        BufferedRegion br;
+        br.reg.doc_id = tok.doc_id;
+        br.reg.type = "del";
+        br.reg.id = tok.tok_id;
+        br.reg.start_pos = tok.global_pos;
+        br.reg.end_pos = tok.global_pos;
+        br.reg.xml_start = tok.xml_start;
+        br.reg.xml_end = tok.xml_end;
+        br.reg.attrs["tok_id"] = tok.tok_id;
+        doc_regions_.push_back(std::move(br));
+        return;
+    }
     BufferedToken bt;
     bt.tok = tok;
     auto it_h = tok.attrs.find("head");

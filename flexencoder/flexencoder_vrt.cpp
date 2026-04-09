@@ -78,8 +78,12 @@ std::string VrtWriter::get_attr(const FlexToken& tok, const std::string& key) co
     if (key == "upos") {
         auto it_upos = tok.attrs.find("upos");
         if (it_upos != tok.attrs.end() && !it_upos->second.empty()) return it_upos->second;
-        auto it_pos = tok.attrs.find("pos");
-        if (it_pos != tok.attrs.end() && !it_pos->second.empty()) return it_pos->second;
+        return "_";
+    }
+    if (key == "xpos") {
+        auto it = tok.attrs.find("xpos");
+        if (it != tok.attrs.end() && !it->second.empty()) return it->second;
+        return "_";
     }
     return "_";
 }
