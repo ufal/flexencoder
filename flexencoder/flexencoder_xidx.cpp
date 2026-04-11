@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
@@ -205,5 +206,7 @@ void XidxWriter::end_corpus() {
 
     per_type_entries_.clear();
     regions_rec_count_ = 0;
+
+    std::cout << "[flexencoder] xidx written under " << xidx_dir_.string() << std::endl;
 }
 

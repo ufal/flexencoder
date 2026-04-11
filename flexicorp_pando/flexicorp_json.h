@@ -232,6 +232,7 @@ inline bool xml_bounds_for_corpus_range(
 
 inline bool xidx_lookup_fragment(
     const std::string& index_dir,
+    const std::string& xidx_project_root_override,
     int64_t corpus_pos_start,
     int64_t corpus_pos_end,
     const std::string& context_scope,
@@ -246,7 +247,12 @@ inline bool xidx_lookup_fragment(
     static std::unordered_map<std::string, std::vector<std::string>> region_types_cache;
     static std::unordered_map<std::string, std::vector<std::string>> region_ids_cache;
 
-    const std::string project_root = derive_project_root(index_dir);
+    // flexencoder always writes xidx under the TEITOK project root. When the Pando index lives
+    // under a custom or nested path (pando/path), deriving root from index_dir points at the wrong
+    // directory — pass explicit project root from the caller when available.
+    std::string project_root = xidx_project_root_override;
+    while (!project_root.empty() && project_root.back() == '/') project_root.pop_back();
+    if (project_root.empty()) project_root = derive_project_root(index_dir);
     if (project_root.empty()) return false;
     const std::string xidx_dir = project_root + "/xidx";
     const std::string tokens_bin = xidx_dir + "/tokens.bin";
@@ -428,14 +434,13 @@ inline bool xidx_lookup_fragment(
         }
     }
 
+    // Pando match positions must align with flexencoder global_pos in tokens.bin. If one side was
+    // rebuilt without the other, keys can differ by ±1; try adjacent token records before failing.
+    // (Previously s/seg had no fallback and always failed on a single-token mismatch — bad for
+    // corpora where xidx and pando were not regenerated together.)
     auto it = tmap.find(corpus_pos_start);
-    if (it == tmap.end()) {
-        // Avoid silently shifting context for sentence container scopes:
-        // if match_start is ever off by one corpus_pos, the fallback would
-        // typically move the sentence region boundary as well.
-        if (context_scope == "s" || context_scope == "seg") return false;
-        if (corpus_pos_start > 0) it = tmap.find(corpus_pos_start - 1);
-    }
+    if (it == tmap.end() && corpus_pos_start > 0) it = tmap.find(corpus_pos_start - 1);
+    if (it == tmap.end()) it = tmap.find(corpus_pos_start + 1);
     if (it == tmap.end()) return false;
     const XidxTokenRec& tr = it->second;
     const int64_t effective_pos = tr.corpus_pos;
@@ -691,7 +696,8 @@ inline std::string to_flexicorp_json(
     double elapsed_ms,
     const manatree::TokenQuery& parsed_query,
     const std::string& index_dir = "",
-    const std::string& context_scope = "s"
+    const std::string& context_scope = "s",
+    const std::string& xidx_project_root = ""
 ) {
     using namespace manatree;
 
@@ -744,6 +750,7 @@ inline std::string to_flexicorp_json(
         std::string xidx_doc_id;
         if (xidx_lookup_fragment(
                 index_dir,
+                xidx_project_root,
                 static_cast<int64_t>(match_start),
                 static_cast<int64_t>(match_end),
                 context_scope,

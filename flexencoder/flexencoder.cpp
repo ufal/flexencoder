@@ -10,6 +10,7 @@
 #include <vector>
 #include <filesystem>
 #include <cstdlib>
+#include <exception>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -353,6 +354,11 @@ int main(int argc, char** argv) {
     writers.push_back(std::make_unique<StatsWriter>());
 
     FlexExtractor extractor(cfg);
-    extractor.run(writers);
+    try {
+        extractor.run(writers);
+    } catch (const std::exception& e) {
+        std::cerr << "[flexencoder] " << e.what() << std::endl;
+        return 1;
+    }
     return 0;
 }

@@ -382,6 +382,9 @@ static std::string handle_request(const std::string& line,
         opts.strict_quoted_strings = false;
         std::string context_scope = json_get_string(line, "context_scope");
         if (context_scope.empty()) context_scope = "s";
+        // TEITOK project root: flexencoder writes xidx/ here; must not be derived from corpus path
+        // when pando/path nests the index (e.g. .../indexes/foo/pando).
+        std::string xidx_project_root = json_get_string(line, "project_root");
 
         std::string attrs_str = json_get_string(line, "attrs");
         if (!attrs_str.empty()) {
@@ -419,7 +422,8 @@ static std::string handle_request(const std::string& line,
                 auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
                 auto [ms, elapsed] = manatree::run_single_query(cc->corpus, query, opts);
                 std::string json = flexicorp_pando::to_flexicorp_json(
-                    cc->corpus, query, ms, opts, elapsed, parsed_query, resolved, context_scope);
+                    cc->corpus, query, ms, opts, elapsed, parsed_query, resolved, context_scope,
+                    xidx_project_root);
                 // Rewrite backend label for daemon context.
                 const std::string old_backend = "\"backend\": \"pando\"";
                 const std::string new_backend = "\"backend\": \"flexicorp-pando\"";

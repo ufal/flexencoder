@@ -26,9 +26,10 @@
 struct flexicorp_pando_ctx {
     manatree::Corpus corpus;
     manatree::ProgramSession program_session;
-    std::string      index_dir;    // resolved path
+    std::string      index_dir;           // resolved path
+    std::string      xidx_project_root;   // TEITOK project root for xidx/ (empty = derive from index_dir)
     std::string      last_error;
-    std::mutex       mu;           // guards concurrent queries (Corpus is not thread-safe)
+    std::mutex       mu;                  // guards concurrent queries (Corpus is not thread-safe)
 };
 
 // Global last-error for failures during open() (before a ctx exists).
@@ -105,6 +106,9 @@ flexicorp_pando_ctx_t* flexicorp_pando_open(
 
     auto ctx = std::make_unique<flexicorp_pando_ctx>();
     ctx->index_dir = dir;
+    if (project_root && *project_root) {
+        ctx->xidx_project_root = std::string(project_root);
+    }
 
     try {
         ctx->corpus.open(dir, preload != 0);
@@ -171,7 +175,8 @@ char* flexicorp_pando_query(
             auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
             auto [ms, elapsed] = manatree::run_single_query(ctx->corpus, query, opts);
             std::string json = flexicorp_pando::to_flexicorp_json(
-                ctx->corpus, query, ms, opts, elapsed, parsed_query, ctx->index_dir, context_scope);
+                ctx->corpus, query, ms, opts, elapsed, parsed_query, ctx->index_dir, context_scope,
+                ctx->xidx_project_root);
             return to_c_str(json);
         }
     } catch (const std::exception& e) {
