@@ -204,19 +204,11 @@ void PandoApiWriter::flush_document() {
             if (it == rattrs.end())
                 rattrs.insert(rattrs.begin(), std::make_pair("id", br.reg.id));
         }
-        // Pando's StreamingBuilder (streaming_builder.cpp) requires that for each
-        // region type, every add_region() pushes the same set of attribute keys;
-        // each key's vector length must equal regions_[type].size(). TEITOK sattrs
-        // are often sparse (e.g. nation only on some <u>), which causes
-        // "Region attr u_nation size mismatch". Same issue as text_pubtime on <text>.
-        //
-        // Until we schema-pad from cqpsettings (always emit every key with "_" for
-        // missing), omit attrs on levels that are typically sparse or cross-doc
-        // inconsistent.
-        if (br.reg.type == "s" || br.reg.type == sentence_region_type_ || br.reg.type == "text" ||
-            br.reg.type == "u") {
-            rattrs.clear();
-        }
+        // StreamingBuilder::add_region (streaming_builder.cpp) pads missing attribute
+        // columns per region with "_" so sparse TEITOK attrs (e.g. only some <u> have
+        // nation) do not cause vector length mismatches. We must not drop attrs for
+        // s/text/u here — otherwise sentence `id` and other sattributes never reach the
+        // index and queries like `freq by s_id` fail with "no region attribute 'id'".
         manatree::CorpusPos start = static_cast<manatree::CorpusPos>(br.reg.start_pos);
         manatree::CorpusPos end   = static_cast<manatree::CorpusPos>(br.reg.end_pos);
         builder_->add_region(br.reg.type, start, end, rattrs);

@@ -121,7 +121,11 @@ static void print_usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0
         << " [--project-root PATH] [--searchfolder xmlfiles] [--output DIR]"
-        << " [--output-clickhouse DIR] [--output-pando DIR] [--output-vrt PATH] [--output-pando-events PATH]"
+        << " [--output-clickhouse DIR]"
+#ifdef USE_PANDO_API
+        << " [--output-pando DIR]"
+#endif
+        << " [--output-vrt PATH] [--output-pando-events PATH]"
         << " [--settings PATH] [--log PATH] [--all]\n"
         << "  If --project-root is omitted, the current working directory is used (run from your TEITOK project folder).\n"
         << "  --output DIR   Write CWB + xidx files to DIR (omit to skip CWB)\n"

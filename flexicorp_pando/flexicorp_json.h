@@ -659,6 +659,30 @@ inline std::string sanitize_xml_fragment_edges(const std::string& xml) {
     return out;
 }
 
+/**
+ * run_program_json returns native Pando program/table JSON (no flexicorp envelope).
+ * TEITOK flexicorp.php expects the same shape as to_flexicorp_json(): success + done.result.
+ */
+inline std::string wrap_program_json_as_flexicorp_response(const std::string& program_json,
+                                                           const std::string& operation = "query") {
+    using namespace manatree;
+    std::string inner = program_json;
+    while (!inner.empty() && (inner.back() == '\n' || inner.back() == '\r')) {
+        inner.pop_back();
+    }
+    if (inner.empty()) {
+        inner = "{}";
+    }
+    std::ostringstream out;
+    out << "{\"success\":true,\"done\":{"
+        << "\"backend\":\"flexicorp-pando\","
+        << "\"operation\":" << jstr(operation) << ","
+        << "\"errors\":[],"
+        << "\"warnings\":[],"
+        << "\"result\":" << inner << "}}";
+    return out.str();
+}
+
 inline std::string to_flexicorp_json(
     const manatree::Corpus& corpus,
     const std::string& query_text,

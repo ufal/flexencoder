@@ -46,6 +46,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -232,6 +233,39 @@ static int json_get_int(const std::string& json, const std::string& key, int dfl
     }
 }
 
+// Optional collocation program options (Pando `coll by …`; window/measures are ProgramOptions).
+static void apply_coll_program_opts_from_json(const std::string& line,
+                                             manatree::ProgramOptions& popts) {
+    int left = json_get_int(line, "left", -1);
+    int right = json_get_int(line, "right", -1);
+    if (left < 0) left = json_get_int(line, "coll_left", -1);
+    if (right < 0) right = json_get_int(line, "coll_right", -1);
+    if (left >= 0) popts.coll_left = left;
+    if (right >= 0) popts.coll_right = right;
+
+    int min_freq = json_get_int(line, "min_freq", -1);
+    if (min_freq < 0) min_freq = json_get_int(line, "coll_min_freq", -1);
+    if (min_freq >= 0) popts.coll_min_freq = static_cast<size_t>(min_freq);
+
+    int max_items = json_get_int(line, "max_items", -1);
+    if (max_items < 0) max_items = json_get_int(line, "coll_max_items", -1);
+    if (max_items >= 0) popts.coll_max_items = static_cast<size_t>(max_items);
+
+    std::string meas = json_get_string(line, "measures");
+    if (meas.empty()) meas = json_get_string(line, "coll_measures");
+    if (!meas.empty()) {
+        popts.coll_measures.clear();
+        std::istringstream ms(meas);
+        std::string part;
+        while (std::getline(ms, part, ',')) {
+            size_t s = part.find_first_not_of(" \t");
+            size_t e = part.find_last_not_of(" \t");
+            if (s != std::string::npos)
+                popts.coll_measures.push_back(part.substr(s, e - s + 1));
+        }
+    }
+}
+
 // ── Request handling ─────────────────────────────────────────────────────
 
 static std::string handle_request(const std::string& line,
@@ -300,10 +334,11 @@ static std::string handle_request(const std::string& line,
         popts.context    = std::max(0, json_get_int(line, "context", 5));
         popts.total      = (line.find("\"total\":true") != std::string::npos);
         popts.group_limit = static_cast<size_t>(std::max(0, json_get_int(line, "group_limit", 1000)));
+        apply_coll_program_opts_from_json(line, popts);
 
         std::lock_guard<std::mutex> lock(cc->mu);
         std::string json = manatree::run_program_json(cc->corpus, cc->program_session, cql, popts);
-        return json;
+        return flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "run");
     }
 
     if (action == "values") {
@@ -343,6 +378,8 @@ static std::string handle_request(const std::string& line,
         opts.max_total = static_cast<size_t>(std::max(0, json_get_int(line, "max_total", 10000)));
         opts.context   = std::max(0, json_get_int(line, "context", 5));
         opts.total     = true;
+        // Keep default daemon behavior aligned with CWB-style quoted regex semantics.
+        opts.strict_quoted_strings = false;
         std::string context_scope = json_get_string(line, "context_scope");
         if (context_scope.empty()) context_scope = "s";
 
@@ -360,38 +397,58 @@ static std::string handle_request(const std::string& line,
 
         std::lock_guard<std::mutex> lock(cc->mu);
         try {
-            auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
-            auto [ms, elapsed] = manatree::run_single_query(cc->corpus, query, opts);
-            std::string json = flexicorp_pando::to_flexicorp_json(
-                cc->corpus, query, ms, opts, elapsed, parsed_query, resolved, context_scope);
-            // Rewrite backend label for daemon context.
-            const std::string old_backend = "\"backend\": \"pando\"";
-            const std::string new_backend = "\"backend\": \"flexicorp-pando\"";
-            size_t bpos = json.find(old_backend);
-            if (bpos != std::string::npos) json.replace(bpos, old_backend.size(), new_backend);
-            if (log_cfg.log_requests) {
-                std::string client_ip = json_get_string(line, "client_ip");
-                std::string request_id = json_get_string(line, "request_id");
-                std::string request_time = json_get_string(line, "request_time");
-                std::ostringstream lg;
-                lg << "ts=" << iso_utc_now()
-                   << " action=query"
-                   << " client_ip=" << (client_ip.empty() ? "-" : client_ip)
-                   << " request_id=" << (request_id.empty() ? "-" : request_id)
-                   << " request_time=" << (request_time.empty() ? "-" : request_time)
-                   << " corpus=" << resolved
-                   << " q=" << manatree::jstr(query)
-                   << " offset=" << opts.offset
-                   << " limit=" << opts.limit
-                   << " total=" << ms.total_count
-                   << " returned=" << ms.matches.size()
-                   << " elapsed_ms=" << elapsed;
-                log_line(log_cfg, lg.str());
+            // Queries that include command separators (e.g. "; freq by lemma;")
+            // must run via program API; run_single_query only executes the first query.
+            const bool has_program_commands = (query.find(';') != std::string::npos);
+            if (has_program_commands) {
+                manatree::ProgramOptions popts;
+                popts.limit = opts.limit;
+                popts.offset = opts.offset;
+                popts.max_total = opts.max_total;
+                popts.context = opts.context;
+                popts.total = true;
+                popts.group_limit = static_cast<size_t>(std::max(0, json_get_int(line, "group_limit", 1000)));
+                popts.attrs = opts.attrs;
+                popts.strict_quoted_strings = false;
+                apply_coll_program_opts_from_json(line, popts);
+                std::string json = manatree::run_program_json(cc->corpus, cc->program_session, query, popts);
+                json = flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query");
+                if (!json.empty() && json.back() != '\n') json += '\n';
+                return json;
+            } else {
+                auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
+                auto [ms, elapsed] = manatree::run_single_query(cc->corpus, query, opts);
+                std::string json = flexicorp_pando::to_flexicorp_json(
+                    cc->corpus, query, ms, opts, elapsed, parsed_query, resolved, context_scope);
+                // Rewrite backend label for daemon context.
+                const std::string old_backend = "\"backend\": \"pando\"";
+                const std::string new_backend = "\"backend\": \"flexicorp-pando\"";
+                size_t bpos = json.find(old_backend);
+                if (bpos != std::string::npos) json.replace(bpos, old_backend.size(), new_backend);
+                if (log_cfg.log_requests) {
+                    std::string client_ip = json_get_string(line, "client_ip");
+                    std::string request_id = json_get_string(line, "request_id");
+                    std::string request_time = json_get_string(line, "request_time");
+                    std::ostringstream lg;
+                    lg << "ts=" << iso_utc_now()
+                       << " action=query"
+                       << " client_ip=" << (client_ip.empty() ? "-" : client_ip)
+                       << " request_id=" << (request_id.empty() ? "-" : request_id)
+                       << " request_time=" << (request_time.empty() ? "-" : request_time)
+                       << " corpus=" << resolved
+                       << " q=" << manatree::jstr(query)
+                       << " offset=" << opts.offset
+                       << " limit=" << opts.limit
+                       << " total=" << ms.total_count
+                       << " returned=" << ms.matches.size()
+                       << " elapsed_ms=" << elapsed;
+                    log_line(log_cfg, lg.str());
+                }
+                // Replace trailing newline with \n delimiter
+                if (!json.empty() && json.back() == '\n') json.back() = '\n';
+                else json += '\n';
+                return json;
             }
-            // Replace trailing newline with \n delimiter
-            if (!json.empty() && json.back() == '\n') json.back() = '\n';
-            else json += '\n';
-            return json;
         } catch (const std::exception& e) {
             std::ostringstream out;
             // Escape the error message for JSON

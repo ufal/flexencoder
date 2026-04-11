@@ -2,6 +2,11 @@
 # Usage: make -f Makefile.flexencoder [flexencoder]
 # Or: make -f Makefile.flexencoder BINDIR=../Scripts
 #
+# Shell: a backslash must be the *last* character on the line (no spaces after it).
+# Put #comments on their own line, not after BINDIR=... on a continued line.
+
+MAKEFLAGS += -r
+#
 # Pando C++ API (direct indexing, no JSONL/subprocess):
 #   make -f Makefile.flexencoder PANDO_SRC=/path/to/manatree PANDO_BUILD=/path/to/manatree/build
 # PANDO_BUILD defaults to $(PANDO_SRC)/build.

@@ -25,6 +25,7 @@
 
 struct flexicorp_pando_ctx {
     manatree::Corpus corpus;
+    manatree::ProgramSession program_session;
     std::string      index_dir;    // resolved path
     std::string      last_error;
     std::mutex       mu;           // guards concurrent queries (Corpus is not thread-safe)
@@ -140,14 +141,39 @@ char* flexicorp_pando_query(
     opts.max_total = static_cast<size_t>(std::max(0, max_total));
     opts.context   = std::max(0, context);
     opts.total     = true;  // always compute total for TEITOK pagination
+    // Keep CWB-compatible semantics: quoted strings with regex metacharacters
+    // are interpreted as whole-token regex unless strict mode is explicitly requested.
+    opts.strict_quoted_strings = false;
     opts.attrs     = parse_attrs(attrs);
+    std::string context_scope = "s";
+    if (const char* env_scope = std::getenv("FLEXICORP_PANDO_CONTEXT_SCOPE")) {
+        std::string s(env_scope);
+        if (!s.empty()) context_scope = s;
+    }
 
     try {
-        auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
-        auto [ms, elapsed] = manatree::run_single_query(ctx->corpus, query, opts);
-        std::string json = flexicorp_pando::to_flexicorp_json(
-            ctx->corpus, query, ms, opts, elapsed, parsed_query, ctx->index_dir, "s");
-        return to_c_str(json);
+        const std::string qstr(query);
+        // Program commands (e.g. "; freq by lemma;") are ignored by run_single_query,
+        // so dispatch those via the full program API to get native table output.
+        if (qstr.find(';') != std::string::npos) {
+            manatree::ProgramOptions popts;
+            popts.limit = opts.limit;
+            popts.offset = opts.offset;
+            popts.max_total = opts.max_total;
+            popts.context = opts.context;
+            popts.total = true;
+            popts.group_limit = 1000;
+            popts.attrs = opts.attrs;
+            popts.strict_quoted_strings = false;
+            std::string json = manatree::run_program_json(ctx->corpus, ctx->program_session, qstr, popts);
+            return to_c_str(flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query"));
+        } else {
+            auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
+            auto [ms, elapsed] = manatree::run_single_query(ctx->corpus, query, opts);
+            std::string json = flexicorp_pando::to_flexicorp_json(
+                ctx->corpus, query, ms, opts, elapsed, parsed_query, ctx->index_dir, context_scope);
+            return to_c_str(json);
+        }
     } catch (const std::exception& e) {
         ctx->last_error = e.what();
         return error_json(e.what());

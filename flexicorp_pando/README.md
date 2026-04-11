@@ -37,6 +37,18 @@ This produces:
 ./flexicorp-pando -p /path/to/teitok/project -q '[upos="VERB"]' --offset 10 --limit 50
 ```
 
+## TEITOK: CLI vs daemon
+
+`teitok/flexicorp.php` tries **flexicorp-pando-server** on a Unix socket first; if the socket
+is absent, it runs **flexicorp-pando** once per request. **Both are valid** — CLI is the usual
+path until you choose to run a long-lived daemon (e.g. for lower latency in production).
+
+```bash
+./start-daemon.sh /path/to/teitok/project
+```
+
+Use `FLEXICORP_PANDO_SOCKET` if you override the socket path (must match TEITOK `pando/socket` or env).
+
 ## PHP FFI usage
 
 ```php
