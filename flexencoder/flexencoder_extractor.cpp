@@ -45,6 +45,44 @@ bool parse_truthy(const char* v) {
     return s == "1" || s == "true" || s == "yes" || s == "y" || s == "on";
 }
 
+std::string ascii_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+/** fieldtype contains a tag requesting `--kv-pipe` indexing for this column (pando-index). */
+bool fieldtype_implies_kv_pipe_index(const std::string& ft) {
+    if (ft.empty()) return false;
+    const std::string l = ascii_lower(ft);
+    if (l.find("kv_pipe") != std::string::npos) return true;
+    if (l.find("kv-pipe") != std::string::npos) return true;
+    if (l.find("ud_feats") != std::string::npos) return true;
+    return false;
+}
+
+/** fieldtype says this column is stored as a single blob (skip kv-pipe index for this field). */
+bool fieldtype_opt_out_kv_pipe_index(const std::string& ft) {
+    if (ft.empty()) return false;
+    const std::string l = ascii_lower(ft);
+    if (l.find("combined") != std::string::npos) return true;
+    if (l.find("no_kv_pipe") != std::string::npos) return true;
+    if (l.find("nokvpipe") != std::string::npos) return true;
+    if (l.find(',') == std::string::npos && (l == "string" || l == "opaque" || l == "atomic")) return true;
+    return false;
+}
+
+bool fieldtype_implies_multivalue(const std::string& ft) {
+    if (ft.empty()) return false;
+    std::istringstream iss(ft);
+    std::string raw;
+    while (std::getline(iss, raw, ',')) {
+        std::string t = trim(ascii_lower(raw));
+        if (t == "multivalue" || t == "multi" || t == "mval") return true;
+    }
+    const std::string l = ascii_lower(ft);
+    return l.find("multivalue") != std::string::npos;
+}
+
 struct DryRunAttrStat {
     std::uint64_t count = 0;
     std::vector<std::string> examples;
@@ -291,6 +329,7 @@ FlexExtractor::FlexExtractor(const FlexConfig& cfg) : cfg_(cfg) {
     load_inherit();
     load_pattributes();
     load_sattributes();
+    apply_pando_kv_pipe_settings();
 
     // Derive JSONL v2 header fields (for pando-index) from cqpsettings.xml.
     // Token columns must match CQP: same keys as <cqp><pattributes> (no implicit UD upos/xpos/deprel).
@@ -522,6 +561,14 @@ void FlexExtractor::load_pattributes() {
                         attr_multivalue("mval") ||
                         attr_multivalue("multi") ||
                         attr_multivalue("mvals");
+        if (item.attribute("fieldtype")) {
+            pa.fieldtype = trim(std::string(item.attribute("fieldtype").value()));
+        }
+        if (item.attribute("kv_pipe")) {
+            pa.has_kv_pipe_attr = true;
+            pa.kv_pipe = parse_truthy(item.attribute("kv_pipe").value());
+        }
+        if (!pa.fieldtype.empty() && fieldtype_implies_multivalue(pa.fieldtype)) pa.multivalue = true;
         pattrs_.push_back(std::move(pa));
     }
 
@@ -600,6 +647,50 @@ void FlexExtractor::load_sattributes() {
         }
         sattrs_.push_back(std::move(sa));
     }
+}
+
+void FlexExtractor::apply_pando_kv_pipe_settings() {
+    cfg_.pando_jsonl2_kv_pipe.clear();
+    cfg_.pando_index_kv_pipe = false;
+
+    auto dedup_sort_vec = [](std::vector<std::string>& v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    };
+
+    // 1) Semantic kv_pipe columns for Pando JSONL header (always when applicable; not tied to CWB).
+    for (const auto& pa : pattrs_) {
+        if (!pa.fieldtype.empty()) {
+            if (fieldtype_opt_out_kv_pipe_index(pa.fieldtype)) continue;
+            if (fieldtype_implies_kv_pipe_index(pa.fieldtype)) {
+                cfg_.pando_jsonl2_kv_pipe.push_back(pa.key);
+                continue;
+            }
+            continue;
+        }
+        if (pa.has_kv_pipe_attr && pa.kv_pipe) {
+            cfg_.pando_jsonl2_kv_pipe.push_back(pa.key);
+            continue;
+        }
+        if (pa.key == "feats") cfg_.pando_jsonl2_kv_pipe.push_back("feats");
+    }
+    dedup_sort_vec(cfg_.pando_jsonl2_kv_pipe);
+
+    // 2) --kv-pipe only: materialize split index files; `no_kv_pipe` disables that, not the header list.
+
+    pugi::xml_node cqp = xmlsettings_ ? xmlsettings_->select_node("/ttsettings/cqp").node() : pugi::xml_node();
+    if (cqp && cqp.attribute("no_kv_pipe") && parse_truthy(cqp.attribute("no_kv_pipe").value())) {
+        return;
+    }
+    if (cqp && cqp.attribute("pando_kv_pipe")) {
+        cfg_.pando_index_kv_pipe = parse_truthy(cqp.attribute("pando_kv_pipe").value());
+        return;
+    }
+    if (cqp && cqp.attribute("kv_pipe")) {
+        cfg_.pando_index_kv_pipe = parse_truthy(cqp.attribute("kv_pipe").value());
+        return;
+    }
+    cfg_.pando_index_kv_pipe = !cfg_.pando_jsonl2_kv_pipe.empty();
 }
 
 std::string FlexExtractor::calc_form(const pugi::xml_node& node, const std::string& fld) const {

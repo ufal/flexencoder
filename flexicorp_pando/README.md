@@ -79,8 +79,8 @@ TEITOK (PHP)
        ├─ CLI mode:  shell_exec("flexicorp-pando -q ...")
        └─ FFI mode:  FFI::cdef(..., "libflexicorp_pando.so")
             └─ flexicorp_pando_query()
-                 └─ manatree::run_single_query()    [pando_api]
-                      └─ manatree::QueryExecutor    [pando_core]
+                 └─ pando::run_single_query()    [pando_api]
+                      └─ pando::QueryExecutor    [pando_core]
                            └─ mmap'd index files
 ```
 

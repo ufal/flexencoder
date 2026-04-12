@@ -1,6 +1,6 @@
 // flexencoder_pando_api.cpp - Pando C++ indexing API writer implementation
 //
-// Build with: make -f Makefile.flexencoder PANDO_SRC=/path/to/manatree PANDO_BUILD=/path/to/manatree/build
+// Build with: make -f Makefile.flexencoder PANDO_SRC=/path/to/pando PANDO_BUILD=/path/to/pando/build
 // Then flexencoder --output-pando DIR will index directly into Pando (no JSONL, no subprocess).
 
 #include "flexencoder_pando_api.hpp"
@@ -78,7 +78,7 @@ void PandoApiWriter::begin_corpus(const FlexConfig& cfg) {
         throw std::runtime_error(std::string("[flexencoder] Pando output check failed: ") + e.what());
     }
 
-    builder_ = std::make_unique<manatree::PandoIndexBuilder>(output_dir_);
+    builder_ = std::make_unique<pando::PandoIndexBuilder>(output_dir_);
     builder_->set_default_within("text");
 #endif
 }
@@ -209,8 +209,8 @@ void PandoApiWriter::flush_document() {
         // nation) do not cause vector length mismatches. We must not drop attrs for
         // s/text/u here — otherwise sentence `id` and other sattributes never reach the
         // index and queries like `freq by s_id` fail with "no region attribute 'id'".
-        manatree::CorpusPos start = static_cast<manatree::CorpusPos>(br.reg.start_pos);
-        manatree::CorpusPos end   = static_cast<manatree::CorpusPos>(br.reg.end_pos);
+        pando::CorpusPos start = static_cast<pando::CorpusPos>(br.reg.start_pos);
+        pando::CorpusPos end   = static_cast<pando::CorpusPos>(br.reg.end_pos);
         builder_->add_region(br.reg.type, start, end, rattrs);
     }
 #endif

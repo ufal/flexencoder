@@ -58,6 +58,20 @@ struct FlexConfig {
     std::string pando_jsonl2_default_within{"text"};
     bool pando_jsonl2_split_feats{false};
 
+    /**
+     * JSONL header `kv_pipe`: positional attribute names whose values are pipe-separated `Key=Val|…`
+     * (Pando query semantics, e.g. feats/Number). Emitted for pando-index always when applicable — not CWB.
+     * Independent of on-disk split indexes; see `pando_index_kv_pipe`.
+     */
+    std::vector<std::string> pando_jsonl2_kv_pipe;
+
+    /**
+     * Pass `--kv-pipe` to `pando-index` only to materialize per-key split index files for kv_pipe columns.
+     * When false (e.g. `cqp/@no_kv_pipe`), JSONL still lists those columns in `pando_jsonl2_kv_pipe` so the
+     * engine knows the field type without building the extra lexicons.
+     */
+    bool pando_index_kv_pipe{false};
+
     /** When true (default), TEITOK `--` placeholder tokens are emitted to Pando as `del` regions, not token rows. Set `cqp/@pando_del_tokens` to 0/false to keep legacy token rows. */
     bool pando_del_tokens{true};
 
@@ -176,6 +190,14 @@ private:
         bool multivalue{false};
         /** Optional: XML attribute name on the token node. From `<item value="..."/>`. Empty = same as `key`. */
         std::string xml_attr;
+        /**
+         * Optional Pando-oriented token semantics: comma-separated tags (e.g. `kv_pipe`, `multivalue`, `combined`).
+         * When empty, legacy `<item multivalue="..."/>` / `kv_pipe="..."` still apply (CWB-compatible).
+         */
+        std::string fieldtype;
+        /** Legacy: `<item kv_pipe="..."/>` — see apply_pando_kv_pipe_settings(). */
+        bool has_kv_pipe_attr{false};
+        bool kv_pipe{false};
     };
     struct SAttrItem {
         std::string key;
@@ -219,6 +241,8 @@ private:
     void load_inherit();
     void load_pattributes();
     void load_sattributes();
+    /** Sets cfg_.pando_index_kv_pipe from cqp + pattributes (feats default, no_kv_pipe opt-out). */
+    void apply_pando_kv_pipe_settings();
 
     // externals_ptr: optional cache of loaded external XML docs (key = path); caller owns and reuses across files
     void treat_file(const std::filesystem::path& path,

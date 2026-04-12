@@ -128,7 +128,11 @@ void PandoEventsWriter::begin_corpus(const FlexConfig& cfg) {
         fs::create_directories(fs::path(index_output_dir_));
         // Real CLI: pando-index [options] <input> <output_dir> with '-' = JSONL on stdin
         // when --format jsonl (see `pando-index --help`).
-        std::string cmd = shell_single_quote(pando_exe_) + " --format jsonl - " + shell_single_quote(index_output_dir_);
+        std::string cmd = shell_single_quote(pando_exe_) + " --format jsonl";
+        if (cfg_snapshot_.pando_index_kv_pipe) {
+            cmd += " --kv-pipe";
+        }
+        cmd += " - " + shell_single_quote(index_output_dir_);
         pipe_ = popen(cmd.c_str(), "w");
         if (!pipe_) {
             std::cerr << "[flexencoder] Warning: could not run pando-index; writing JSONL to " << jsonl_fallback_
@@ -201,6 +205,15 @@ void PandoEventsWriter::write_header_line() {
         for (size_t i = 0; i < cfg_snapshot_.pando_jsonl2_multivalue.size(); ++i) {
             if (i) O() << ',';
             write_json_string(cfg_snapshot_.pando_jsonl2_multivalue[i]);
+        }
+        O() << ']';
+    }
+
+    if (!cfg_snapshot_.pando_jsonl2_kv_pipe.empty()) {
+        O() << ",\"kv_pipe\":[";
+        for (size_t i = 0; i < cfg_snapshot_.pando_jsonl2_kv_pipe.size(); ++i) {
+            if (i) O() << ',';
+            write_json_string(cfg_snapshot_.pando_jsonl2_kv_pipe[i]);
         }
         O() << ']';
     }

@@ -1,6 +1,6 @@
 // flexicorp_pando.cpp — C API implementation
 //
-// Wraps the Pando C++ API (manatree::Corpus, run_single_query)
+// Wraps the Pando C++ API (pando::Corpus, run_single_query)
 // behind a C ABI for PHP FFI consumption.
 //
 // JSON output matches the flexicorp CLI envelope so flexicorp.php
@@ -24,8 +24,8 @@
 // ── Internal context ─────────────────────────────────────────────────────
 
 struct flexicorp_pando_ctx {
-    manatree::Corpus corpus;
-    manatree::ProgramSession program_session;
+    pando::Corpus corpus;
+    pando::ProgramSession program_session;
     std::string      index_dir;           // resolved path
     std::string      xidx_project_root;   // TEITOK project root for xidx/ (empty = derive from index_dir)
     std::string      last_error;
@@ -56,7 +56,7 @@ static char* error_json(const std::string& msg) {
     out << "    \"operation\": \"query\",\n";
     out << "    \"result\": null,\n";
     out << "    \"warnings\": [],\n";
-    out << "    \"errors\": [" << manatree::jstr(msg) << "]\n";
+    out << "    \"errors\": [" << pando::jstr(msg) << "]\n";
     out << "  }\n";
     out << "}\n";
     return to_c_str(out.str());
@@ -139,7 +139,7 @@ char* flexicorp_pando_query(
     std::lock_guard<std::mutex> lock(ctx->mu);
     ctx->last_error.clear();
 
-    manatree::QueryOptions opts;
+    pando::QueryOptions opts;
     opts.offset    = static_cast<size_t>(std::max(0, offset));
     opts.limit     = static_cast<size_t>(std::max(1, limit));
     opts.max_total = static_cast<size_t>(std::max(0, max_total));
@@ -160,7 +160,7 @@ char* flexicorp_pando_query(
         // Program commands (e.g. "; freq by lemma;") are ignored by run_single_query,
         // so dispatch those via the full program API to get native table output.
         if (qstr.find(';') != std::string::npos) {
-            manatree::ProgramOptions popts;
+            pando::ProgramOptions popts;
             popts.limit = opts.limit;
             popts.offset = opts.offset;
             popts.max_total = opts.max_total;
@@ -169,11 +169,11 @@ char* flexicorp_pando_query(
             popts.group_limit = 1000;
             popts.attrs = opts.attrs;
             popts.strict_quoted_strings = false;
-            std::string json = manatree::run_program_json(ctx->corpus, ctx->program_session, qstr, popts);
+            std::string json = pando::run_program_json(ctx->corpus, ctx->program_session, qstr, popts);
             return to_c_str(flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query"));
         } else {
             auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
-            auto [ms, elapsed] = manatree::run_single_query(ctx->corpus, query, opts);
+            auto [ms, elapsed] = pando::run_single_query(ctx->corpus, query, opts);
             std::string json = flexicorp_pando::to_flexicorp_json(
                 ctx->corpus, query, ms, opts, elapsed, parsed_query, ctx->index_dir, context_scope,
                 ctx->xidx_project_root);
@@ -192,7 +192,7 @@ char* flexicorp_pando_info(flexicorp_pando_ctx_t* ctx) {
     ctx->last_error.clear();
 
     try {
-        using namespace manatree;
+        using namespace pando;
         std::ostringstream out;
         out << "{\n";
         out << "  \"success\": true,\n";

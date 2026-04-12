@@ -97,8 +97,8 @@ static std::string iso_utc_now() {
 // ── Corpus cache ─────────────────────────────────────────────────────────
 
 struct CachedCorpus {
-    manatree::Corpus corpus;
-    manatree::ProgramSession program_session;  // session state for run_program_json
+    pando::Corpus corpus;
+    pando::ProgramSession program_session;  // session state for run_program_json
     std::mutex mu;                    // guards concurrent queries on this corpus
     std::chrono::steady_clock::time_point last_used;
 };
@@ -235,7 +235,7 @@ static int json_get_int(const std::string& json, const std::string& key, int dfl
 
 // Optional collocation program options (Pando `coll by …`; window/measures are ProgramOptions).
 static void apply_coll_program_opts_from_json(const std::string& line,
-                                             manatree::ProgramOptions& popts) {
+                                             pando::ProgramOptions& popts) {
     int left = json_get_int(line, "left", -1);
     int right = json_get_int(line, "right", -1);
     if (left < 0) left = json_get_int(line, "coll_left", -1);
@@ -304,7 +304,7 @@ static std::string handle_request(const std::string& line,
     if (action == "invalidate" || action == "drop_corpus") {
         cache.drop(resolved);
         std::ostringstream out;
-        out << "{\"ok\":true,\"invalidated\":true,\"corpus\":" << manatree::jstr(resolved) << "}\n";
+        out << "{\"ok\":true,\"invalidated\":true,\"corpus\":" << pando::jstr(resolved) << "}\n";
         return out.str();
     }
 
@@ -318,7 +318,7 @@ static std::string handle_request(const std::string& line,
 
     if (action == "info") {
         std::lock_guard<std::mutex> lock(cc->mu);
-        return manatree::to_info_json(cc->corpus) + "\n";
+        return pando::to_info_json(cc->corpus) + "\n";
     }
 
     if (action == "run") {
@@ -327,7 +327,7 @@ static std::string handle_request(const std::string& line,
         if (cql.empty())
             return "{\"ok\":false,\"error\":\"missing 'cql' field\"}\n";
 
-        manatree::ProgramOptions popts;
+        pando::ProgramOptions popts;
         popts.limit      = static_cast<size_t>(std::max(1, json_get_int(line, "limit", 20)));
         popts.offset     = static_cast<size_t>(std::max(0, json_get_int(line, "offset", 0)));
         popts.max_total  = static_cast<size_t>(std::max(0, json_get_int(line, "max_total", 0)));
@@ -337,7 +337,7 @@ static std::string handle_request(const std::string& line,
         apply_coll_program_opts_from_json(line, popts);
 
         std::lock_guard<std::mutex> lock(cc->mu);
-        std::string json = manatree::run_program_json(cc->corpus, cc->program_session, cql, popts);
+        std::string json = pando::run_program_json(cc->corpus, cc->program_session, cql, popts);
         return flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "run");
     }
 
@@ -348,7 +348,7 @@ static std::string handle_request(const std::string& line,
         int limit_i = json_get_int(line, "limit", 0);
         size_t limit = (limit_i > 0) ? static_cast<size_t>(limit_i) : 0;
         std::lock_guard<std::mutex> lock(cc->mu);
-        std::string json = manatree::to_values_json(cc->corpus, attr, limit);
+        std::string json = pando::to_values_json(cc->corpus, attr, limit);
         if (json.empty())
             return "{\"ok\":false,\"error\":\"unknown attribute: " + attr + "\"}\n";
         return json;
@@ -361,7 +361,7 @@ static std::string handle_request(const std::string& line,
         int limit_i = json_get_int(line, "limit", 0);
         size_t limit = (limit_i > 0) ? static_cast<size_t>(limit_i) : 0;
         std::lock_guard<std::mutex> lock(cc->mu);
-        std::string json = manatree::to_regions_json(cc->corpus, type, limit);
+        std::string json = pando::to_regions_json(cc->corpus, type, limit);
         if (json.empty())
             return "{\"ok\":false,\"error\":\"unknown structure type: " + type + "\"}\n";
         return json;
@@ -372,7 +372,7 @@ static std::string handle_request(const std::string& line,
         if (query.empty())
             return "{\"ok\":false,\"error\":\"missing 'query' field\"}\n";
 
-        manatree::QueryOptions opts;
+        pando::QueryOptions opts;
         opts.offset    = static_cast<size_t>(std::max(0, json_get_int(line, "offset", 0)));
         opts.limit     = static_cast<size_t>(std::max(1, json_get_int(line, "limit", 20)));
         opts.max_total = static_cast<size_t>(std::max(0, json_get_int(line, "max_total", 10000)));
@@ -404,7 +404,7 @@ static std::string handle_request(const std::string& line,
             // must run via program API; run_single_query only executes the first query.
             const bool has_program_commands = (query.find(';') != std::string::npos);
             if (has_program_commands) {
-                manatree::ProgramOptions popts;
+                pando::ProgramOptions popts;
                 popts.limit = opts.limit;
                 popts.offset = opts.offset;
                 popts.max_total = opts.max_total;
@@ -414,13 +414,13 @@ static std::string handle_request(const std::string& line,
                 popts.attrs = opts.attrs;
                 popts.strict_quoted_strings = false;
                 apply_coll_program_opts_from_json(line, popts);
-                std::string json = manatree::run_program_json(cc->corpus, cc->program_session, query, popts);
+                std::string json = pando::run_program_json(cc->corpus, cc->program_session, query, popts);
                 json = flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query");
                 if (!json.empty() && json.back() != '\n') json += '\n';
                 return json;
             } else {
                 auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
-                auto [ms, elapsed] = manatree::run_single_query(cc->corpus, query, opts);
+                auto [ms, elapsed] = pando::run_single_query(cc->corpus, query, opts);
                 std::string json = flexicorp_pando::to_flexicorp_json(
                     cc->corpus, query, ms, opts, elapsed, parsed_query, resolved, context_scope,
                     xidx_project_root);
@@ -440,7 +440,7 @@ static std::string handle_request(const std::string& line,
                        << " request_id=" << (request_id.empty() ? "-" : request_id)
                        << " request_time=" << (request_time.empty() ? "-" : request_time)
                        << " corpus=" << resolved
-                       << " q=" << manatree::jstr(query)
+                       << " q=" << pando::jstr(query)
                        << " offset=" << opts.offset
                        << " limit=" << opts.limit
                        << " total=" << ms.total_count
@@ -475,7 +475,7 @@ static std::string handle_request(const std::string& line,
                    << " request_id=" << (request_id.empty() ? "-" : request_id)
                    << " request_time=" << (request_time.empty() ? "-" : request_time)
                    << " corpus=" << resolved
-                   << " q=" << manatree::jstr(query)
+                   << " q=" << pando::jstr(query)
                    << " ERROR=" << escaped;
                 log_line(log_cfg, lg.str());
             }

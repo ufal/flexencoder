@@ -402,6 +402,14 @@ void FlexdecodeJsonlWriter::write_header_line() {
         }
         out_ << ']';
     }
+    if (!cfg_.pando_jsonl2_kv_pipe.empty()) {
+        out_ << ",\"kv_pipe\":[";
+        for (std::size_t i = 0; i < cfg_.pando_jsonl2_kv_pipe.size(); ++i) {
+            if (i) out_ << ',';
+            write_json_string(out_, cfg_.pando_jsonl2_kv_pipe[i]);
+        }
+        out_ << ']';
+    }
     if (!cfg_.corpus_id.empty()) {
         out_ << ",\"description\":";
         write_json_string(out_, std::string("flexdecoder CWB export; corpus=") + cfg_.corpus_id);

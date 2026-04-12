@@ -8,7 +8,7 @@
 MAKEFLAGS += -r
 #
 # Pando C++ API (direct indexing, no JSONL/subprocess):
-#   make -f Makefile.flexencoder PANDO_SRC=/path/to/manatree PANDO_BUILD=/path/to/manatree/build
+#   make -f Makefile.flexencoder PANDO_SRC=/path/to/pando PANDO_BUILD=/path/to/pando/build
 # PANDO_BUILD defaults to $(PANDO_SRC)/build.
 
 CXX = g++
@@ -19,7 +19,7 @@ FLEXENCODER_SRCS = flexencoder.cpp flexencoder_extractor.cpp flexencoder_cwb.cpp
                    flexencoder_clickhouse.cpp flexencoder_pando.cpp flexencoder_xidx.cpp flexencoder_vrt.cpp \
                    flexencoder_makeall.cpp flexencoder_helpers.cpp pugixml.cpp functions-c11.cpp
 
-# Optional: Pando index API (manatree::PandoIndexBuilder)
+# Optional: Pando index API (pando::PandoIndexBuilder)
 ifdef PANDO_SRC
 PANDO_BUILD ?= $(PANDO_SRC)/build
 CXXFLAGS += -DUSE_PANDO_API -I$(PANDO_SRC)/src

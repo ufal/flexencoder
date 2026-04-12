@@ -670,7 +670,7 @@ inline std::string sanitize_xml_fragment_edges(const std::string& xml) {
  */
 inline std::string wrap_program_json_as_flexicorp_response(const std::string& program_json,
                                                            const std::string& operation = "query") {
-    using namespace manatree;
+    using namespace pando;
     std::string inner = program_json;
     while (!inner.empty() && (inner.back() == '\n' || inner.back() == '\r')) {
         inner.pop_back();
@@ -689,17 +689,17 @@ inline std::string wrap_program_json_as_flexicorp_response(const std::string& pr
 }
 
 inline std::string to_flexicorp_json(
-    const manatree::Corpus& corpus,
+    const pando::Corpus& corpus,
     const std::string& query_text,
-    const manatree::MatchSet& ms,
-    const manatree::QueryOptions& opts,
+    const pando::MatchSet& ms,
+    const pando::QueryOptions& opts,
     double elapsed_ms,
-    const manatree::TokenQuery& parsed_query,
+    const pando::TokenQuery& parsed_query,
     const std::string& index_dir = "",
     const std::string& context_scope = "s",
     const std::string& xidx_project_root = ""
 ) {
-    using namespace manatree;
+    using namespace pando;
 
     NameIndexMap name_map = build_name_map(parsed_query);
 
@@ -868,9 +868,9 @@ inline std::string to_flexicorp_json(
     return out.str();
 }
 
-inline manatree::TokenQuery parse_query_for_groups(const std::string& query_text) {
-    manatree::Parser parser(query_text);
-    manatree::Program prog = parser.parse();
+inline pando::TokenQuery parse_query_for_groups(const std::string& query_text) {
+    pando::Parser parser(query_text);
+    pando::Program prog = parser.parse();
     if (!prog.empty() && prog[0].has_query)
         return prog[0].query;
     return {};

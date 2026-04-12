@@ -1,4 +1,4 @@
-// flexencoder_pando_api.hpp - Pando C++ indexing API writer (manatree::PandoIndexBuilder)
+// flexencoder_pando_api.hpp - Pando C++ indexing API writer (pando::PandoIndexBuilder)
 //
 // Compile with -DUSE_PANDO_API and -I$(PANDO_SRC)/src to link against Pando's index_api.
 // Single TEITOK walk: no JSONL temp, no subprocess.
@@ -31,7 +31,7 @@ private:
     FlexConfig cfg_snapshot_{};
 
 #ifdef USE_PANDO_API
-    std::unique_ptr<manatree::PandoIndexBuilder> builder_;
+    std::unique_ptr<pando::PandoIndexBuilder> builder_;
 
     struct BufferedToken {
         FlexToken tok;

@@ -255,9 +255,9 @@ int main(int argc, char** argv) {
                 output_pando_events = cfg.project_root + "/pando-events.jsonl";
                 std::cerr << "[flexencoder] Warning: pando-index not found on PATH; writing JSONL to "
                           << output_pando_events << "\n"
-                          << "        Build manatree, then install pando-index on PATH, e.g.\n"
-                          << "        cmake -S /path/to/manatree -B /path/to/manatree/build && "
-                             "cmake --build /path/to/manatree/build --target pando-index\n";
+                          << "        Build Pando, then install pando-index on PATH, e.g.\n"
+                          << "        cmake -S /path/to/pando -B /path/to/pando/build && "
+                             "cmake --build /path/to/pando/build --target pando-index\n";
             }
 #endif
         }
