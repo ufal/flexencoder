@@ -193,7 +193,7 @@ void PandoApiWriter::flush_document() {
     if (current_sent_id != 0)
         builder_->end_sentence();
 
-    // Regions: start/end are 0-based corpus positions (FlexRegion uses global_pos)
+    // Regions: FlexRegion uses 1-based global_pos; convert to 0-based for Pando (see below).
     for (const auto& br : doc_regions_) {
         std::vector<std::pair<std::string, std::string>> rattrs;
         for (const auto& kv : br.reg.attrs)
@@ -209,8 +209,12 @@ void PandoApiWriter::flush_document() {
         // nation) do not cause vector length mismatches. We must not drop attrs for
         // s/text/u here — otherwise sentence `id` and other sattributes never reach the
         // index and queries like `freq by s_id` fail with "no region attribute 'id'".
-        pando::CorpusPos start = static_cast<pando::CorpusPos>(br.reg.start_pos);
-        pando::CorpusPos end   = static_cast<pando::CorpusPos>(br.reg.end_pos);
+        // FlexRegion start/end use the same 1-based global_pos as tokens; Pando expects
+        // 0-based corpus positions (same conversion as PandoEventsWriter / fixed pando-index JSONL).
+        const std::uint64_t start0 = (br.reg.start_pos > 0 ? br.reg.start_pos - 1 : 0);
+        const std::uint64_t end0 = (br.reg.end_pos > 0 ? br.reg.end_pos - 1 : 0);
+        pando::CorpusPos start = static_cast<pando::CorpusPos>(start0);
+        pando::CorpusPos end   = static_cast<pando::CorpusPos>(end0);
         builder_->add_region(br.reg.type, start, end, rattrs);
     }
 #endif
