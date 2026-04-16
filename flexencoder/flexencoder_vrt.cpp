@@ -1,6 +1,7 @@
 // flexencoder_vrt.cpp - Manatee-style VRT writer implementation
 
 #include "flexencoder_vrt.hpp"
+#include <algorithm>
 #include <iostream>
 #include <filesystem>
 #include <sstream>
