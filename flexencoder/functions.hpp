@@ -1,3 +1,6 @@
+#include <string>
+#include <vector>
+
 // Local version of stoi - relies currently on C++ 11
 int intval(std::string str);
 bool preg_match ( std::string str, std::string pat, std::vector<std::string> *regmatch );
