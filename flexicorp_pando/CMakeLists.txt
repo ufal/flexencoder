@@ -3,6 +3,9 @@ project(flexicorp_pando VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Ensure vendored/static deps (notably pando_core) are PIC so they can be linked
+# into libflexicorp_pando on aarch64/arm64.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── Pando dependency ──────────────────────────────────────────────────────
 # Point PANDO_DIR at the Pando source tree (where CMakeLists.txt and src/ are).
