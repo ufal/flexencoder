@@ -171,6 +171,8 @@ void CwbWriter::begin_corpus(const FlexConfig& cfg) {
     files_["text_id"]["idx"] = fopen((corpusfolder + "/text_id.idx").c_str(), "wb");
     files_["xidx"]["rng"] = fopen((corpusfolder + "/xidx.rng").c_str(), "wb");
 
+    // Absolute HOME/INFO break after copying the corpus tree (Docker, rsync). TEITOK operators can
+    // run dev/fix_teitok_cqp_registry.py on the project root to rewrite paths on the destination.
     char rpath[4096];
     const char* home = realpath(corpusfolder.c_str(), rpath) ? rpath : corpusfolder.c_str();
     std::ofstream reg(corpusfolder + "/" + corpus_name_);

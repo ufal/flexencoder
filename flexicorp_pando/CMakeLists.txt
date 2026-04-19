@@ -41,6 +41,24 @@ add_executable(flexicorp-pando main.cpp)
 target_include_directories(flexicorp-pando PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(flexicorp-pando PRIVATE flexicorp_pando)
 
+# The CLI links against libflexicorp_pando. Without explicit rpath, macOS/Linux
+# often embed the *build tree* path; copying only flexicorp-pando to e.g.
+# /usr/local/bin then fails with "Library not loaded: @rpath/libflexicorp_pando".
+# @loader_path / $ORIGIN keeps the dylib next to the binary in the build dir;
+# cmake --install places lib/ and bin/ so ../lib resolves.
+if(APPLE)
+	set_target_properties(flexicorp-pando PROPERTIES
+		MACOSX_RPATH ON
+		BUILD_RPATH "@loader_path"
+		INSTALL_RPATH "@loader_path/../lib"
+	)
+else()
+	set_target_properties(flexicorp-pando PROPERTIES
+		BUILD_RPATH "\$ORIGIN"
+		INSTALL_RPATH "\$ORIGIN/../lib"
+	)
+endif()
+
 # ── Daemon: flexicorp-pando-server ────────────────────────────────────────
 # Unix socket server — keeps corpora open, serves multiple PHP workers.
 add_executable(flexicorp-pando-server server.cpp)
@@ -51,3 +69,9 @@ target_include_directories(flexicorp-pando-server
 target_link_libraries(flexicorp-pando-server PRIVATE pando_api pando_core)
 find_package(Threads REQUIRED)
 target_link_libraries(flexicorp-pando-server PRIVATE Threads::Threads)
+
+# Optional: prefix install (e.g. cmake --install . --prefix /usr/local)
+install(TARGETS flexicorp_pando flexicorp-pando flexicorp-pando-server
+	LIBRARY DESTINATION lib
+	RUNTIME DESTINATION bin
+)
