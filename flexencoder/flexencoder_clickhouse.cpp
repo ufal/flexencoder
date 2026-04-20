@@ -272,18 +272,31 @@ void ClickHouseWriter::end_document(const FlexDocumentMeta& doc) {
     }
 
     std::map<std::string, std::uint64_t> tok_id_to_tok_pos;
-    std::vector<std::uint64_t> doc_tok_positions;
-    doc_tok_positions.reserve(doc_tokens_.size());
+    std::vector<std::uint64_t> emitted_tok_positions(doc_tokens_.size(), 0);
+    std::vector<std::uint64_t> emitted_doc_positions(doc_tokens_.size(), 0);
+    std::uint64_t doc_tok_pos = 0;
     for (size_t i = 0; i < doc_tokens_.size(); ++i) {
+        const auto& bt = doc_tokens_[i];
+        std::string word_val = bt.tok.attrs.count("word") ? bt.tok.attrs.at("word") : "";
+        if (word_val.empty()) {
+            auto it_f = bt.tok.attrs.find(wordfld_);
+            if (it_f != bt.tok.attrs.end()) word_val = it_f->second;
+        }
+        // Keep ClickHouse tok_pos/doc_pos aligned with CWB cpos semantics:
+        // skip TEITOK placeholder tokens ("--") from positional streams.
+        if (word_val == "--" && bt.tok.tok_id != "w-empty") continue;
         tok_pos_++;
-        doc_tok_positions.push_back(tok_pos_);
-        tok_id_to_tok_pos[doc_tokens_[i].tok.tok_id] = tok_pos_;
+        doc_tok_pos++;
+        emitted_tok_positions[i] = tok_pos_;
+        emitted_doc_positions[i] = doc_tok_pos;
+        tok_id_to_tok_pos[bt.tok.tok_id] = tok_pos_;
     }
 
     std::map<std::uint64_t, std::uint64_t> sent_ord_counter;
     for (size_t i = 0; i < doc_tokens_.size(); ++i) {
         const auto& bt = doc_tokens_[i];
-        std::uint64_t tok_pos = doc_tok_positions[i];
+        std::uint64_t tok_pos = emitted_tok_positions[i];
+        if (tok_pos == 0) continue;
         std::uint64_t global_pos = bt.tok.global_pos;
         std::uint64_t sentence_id = 0;
         std::uint64_t sent_ord = 0;
@@ -335,9 +348,9 @@ void ClickHouseWriter::end_document(const FlexDocumentMeta& doc) {
             if (it != tok_id_to_tok_pos.end()) head_tok_pos = static_cast<std::int64_t>(it->second);
         }
         std::string word_val = bt.tok.attrs.count("word") ? bt.tok.attrs.at("word") : "";
-        bool is_empty = (word_val == "--");
+        bool is_empty = false;
         std::string inner_text = bt.tok.attrs.count("inner_text") ? bt.tok.attrs.at("inner_text") : "";
-        write_toks_row(seq_id, doc_id_, sentence_id, bt.tok.doc_pos, tok_pos, sent_ord,
+        write_toks_row(seq_id, doc_id_, sentence_id, emitted_doc_positions[i], tok_pos, sent_ord,
                        bt.tok.tok_id, form, lemma, upos, bt.deprel, head_tok_pos,
                        feats, region_ids, metadata, bt.tok.xml_start, bt.tok.xml_end, is_empty, inner_text);
         if (!bt.head_tok_id.empty() && !bt.deprel.empty())
