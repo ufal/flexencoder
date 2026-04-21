@@ -17,7 +17,7 @@
 
 class XidxWriter : public IFlexBackendWriter {
 public:
-    explicit XidxWriter(const std::string& project_root);
+    explicit XidxWriter(const std::string& project_root, const std::string& xidx_output_dir = "");
 
     void begin_corpus(const FlexConfig& cfg) override;
     void begin_document(const FlexDocumentMeta& doc) override;
@@ -28,6 +28,7 @@ public:
 
 private:
     std::string project_root_;
+    std::string xidx_output_dir_;
 
     std::filesystem::path xidx_dir_;
     std::ofstream tokens_bin_;

@@ -38,8 +38,8 @@ static void write_record(std::ofstream& out, const void* rec, std::size_t size) 
 
 } // namespace
 
-XidxWriter::XidxWriter(const std::string& project_root)
-    : project_root_(project_root) {}
+XidxWriter::XidxWriter(const std::string& project_root, const std::string& xidx_output_dir)
+    : project_root_(project_root), xidx_output_dir_(xidx_output_dir) {}
 
 void XidxWriter::begin_corpus(const FlexConfig& cfg) {
     (void)cfg;
@@ -47,7 +47,15 @@ void XidxWriter::begin_corpus(const FlexConfig& cfg) {
     if (!root.is_absolute()) {
         root = fs::absolute(root);
     }
-    xidx_dir_ = root / "xidx";
+    if (!xidx_output_dir_.empty()) {
+        fs::path out(xidx_output_dir_);
+        if (!out.is_absolute()) {
+            out = root / out;
+        }
+        xidx_dir_ = out;
+    } else {
+        xidx_dir_ = root / "xidx";
+    }
     fs::create_directories(xidx_dir_);
 
     tokens_bin_.open(xidx_dir_ / "tokens.bin", std::ios::binary | std::ios::trunc);

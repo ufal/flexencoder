@@ -126,6 +126,7 @@ static void print_usage(const char* argv0) {
 #ifdef USE_PANDO_API
         << " [--output-pando DIR]"
 #endif
+        << " [--output-xidx DIR]"
         << " [--output-vrt PATH] [--output-pando-events PATH]"
         << " [--settings PATH] [--log PATH] [--all]\n"
         << "  If --project-root is omitted, the current working directory is used (run from your TEITOK project folder).\n"
@@ -135,6 +136,8 @@ static void print_usage(const char* argv0) {
 #ifdef USE_PANDO_API
         << "  --output-pando DIR   Also build Pando index in DIR (C++ API; single walk, no subprocess)\n"
 #endif
+        << "  --output-xidx DIR   Write backend-agnostic xidx files to DIR "
+        << "(default: project_root/xidx)\n"
         << "  --output-pando-events PATH   Also write Pando JSONL events to PATH "
         << "(e.g. /tmp/pando-events.jsonl; use when not linking Pando API)\n"
         << "  --dry-run   Scan TEITOK XML (sample) and print JSON settings-check report on stdout\n"
@@ -158,6 +161,7 @@ int main(int argc, char** argv) {
     std::string output_dir;
     std::string output_clickhouse;
     std::string output_pando;
+    std::string output_xidx;
     std::string output_vrt;
     std::string output_pando_events;
     bool pando_events_explicit = false;
@@ -182,6 +186,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--output-pando" && i + 1 < argc) {
             output_pando = argv[++i];
 #endif
+        } else if (arg == "--output-xidx" && i + 1 < argc) {
+            output_xidx = argv[++i];
         } else if (arg == "--output-vrt" && i + 1 < argc) {
             output_vrt = argv[++i];
         } else if (arg == "--output-pando-events" && i + 1 < argc) {
@@ -292,6 +298,13 @@ int main(int argc, char** argv) {
         output_pando = po_out.string();
     }
 #endif
+    if (!output_xidx.empty()) {
+        fs::path x_out(output_xidx);
+        if (!x_out.is_absolute()) {
+            x_out = fs::path(cfg.project_root) / x_out;
+        }
+        output_xidx = x_out.string();
+    }
     if (!output_vrt.empty()) {
         fs::path v_out(output_vrt);
         if (!v_out.is_absolute()) {
@@ -325,10 +338,9 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::unique_ptr<IFlexBackendWriter>> writers;
-    // Always build backend-agnostic xidx under project_root/xidx so all backends
-    // can resolve corpus positions to TEITOK XML fragments without relying on
-    // CWB-specific xidx files.
-    writers.push_back(std::make_unique<XidxWriter>(cfg.project_root));
+    // Always build backend-agnostic xidx so all backends can resolve corpus
+    // positions to TEITOK XML fragments without relying on CWB-specific xidx files.
+    writers.push_back(std::make_unique<XidxWriter>(cfg.project_root, output_xidx));
     if (!output_dir.empty()) {
         writers.push_back(std::make_unique<CwbWriter>(output_dir));
     }
