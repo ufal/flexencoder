@@ -154,6 +154,12 @@ char* flexicorp_pando_query(
         std::string s(env_scope);
         if (!s.empty()) context_scope = s;
     }
+    std::string fragment_env;
+    if (const char* fe = std::getenv("FLEXICORP_FRAGMENT_CONTEXT_SCOPE")) {
+        fragment_env = fe;
+    }
+    flexicorp_pando::PandoFragmentEmitPolicy frag_emit = flexicorp_pando::resolve_pando_fragment_emit_policy(
+        context_scope, ctx->xidx_project_root, fragment_env, true);
 
     try {
         const std::string qstr(query);
@@ -175,8 +181,17 @@ char* flexicorp_pando_query(
             auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
             auto [ms, elapsed] = pando::run_single_query(ctx->corpus, query, opts);
             std::string json = flexicorp_pando::to_flexicorp_json(
-                ctx->corpus, query, ms, opts, elapsed, parsed_query, ctx->index_dir, context_scope,
-                ctx->xidx_project_root);
+                ctx->corpus,
+                query,
+                ms,
+                opts,
+                elapsed,
+                parsed_query,
+                ctx->index_dir,
+                frag_emit.context_scope,
+                ctx->xidx_project_root,
+                frag_emit.include_xidx_fragment,
+                &frag_emit);
             return to_c_str(json);
         }
     } catch (const std::exception& e) {

@@ -233,6 +233,28 @@ static int json_get_int(const std::string& json, const std::string& key, int dfl
     }
 }
 
+static bool json_get_bool(const std::string& json, const std::string& key, bool dflt) {
+    std::string needle = "\"" + key + "\"";
+    size_t search_from = 0;
+    while (true) {
+        auto key_pos = json.find(needle, search_from);
+        if (key_pos == std::string::npos) return dflt;
+        size_t pos = key_pos + needle.size();
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) ++pos;
+        if (pos >= json.size() || json[pos] != ':') {
+            search_from = key_pos + needle.size();
+            continue;
+        }
+        ++pos;
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) ++pos;
+        if (pos + 4 <= json.size() && json.compare(pos, 4, "true") == 0) return true;
+        if (pos + 5 <= json.size() && json.compare(pos, 5, "false") == 0) return false;
+        if (pos < json.size() && json[pos] == '1') return true;
+        if (pos < json.size() && json[pos] == '0') return false;
+        return dflt;
+    }
+}
+
 // Optional collocation program options (Pando `coll by …`; window/measures are ProgramOptions).
 static void apply_coll_program_opts_from_json(const std::string& line,
                                              pando::ProgramOptions& popts) {
@@ -385,6 +407,12 @@ static std::string handle_request(const std::string& line,
         // TEITOK project root: flexencoder writes xidx/ here; must not be derived from corpus path
         // when pando/path nests the index (e.g. .../indexes/foo/pando).
         std::string xidx_project_root = json_get_string(line, "project_root");
+        std::string fragment_scope_override = json_get_string(line, "fragment_context_scope");
+        if (fragment_scope_override.empty())
+            fragment_scope_override = json_get_string(line, "flexicorp_fragment_context_scope");
+        const bool extract_fragments = json_get_bool(line, "extract_fragments", true);
+        flexicorp_pando::PandoFragmentEmitPolicy frag_emit = flexicorp_pando::resolve_pando_fragment_emit_policy(
+            context_scope, xidx_project_root, fragment_scope_override, extract_fragments);
 
         std::string attrs_str = json_get_string(line, "attrs");
         if (!attrs_str.empty()) {
@@ -422,8 +450,17 @@ static std::string handle_request(const std::string& line,
                 auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
                 auto [ms, elapsed] = pando::run_single_query(cc->corpus, query, opts);
                 std::string json = flexicorp_pando::to_flexicorp_json(
-                    cc->corpus, query, ms, opts, elapsed, parsed_query, resolved, context_scope,
-                    xidx_project_root);
+                    cc->corpus,
+                    query,
+                    ms,
+                    opts,
+                    elapsed,
+                    parsed_query,
+                    resolved,
+                    frag_emit.context_scope,
+                    xidx_project_root,
+                    frag_emit.include_xidx_fragment,
+                    &frag_emit);
                 // Rewrite backend label for daemon context.
                 const std::string old_backend = "\"backend\": \"pando\"";
                 const std::string new_backend = "\"backend\": \"flexicorp-pando\"";

@@ -11,6 +11,7 @@
 #include "core/json_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -237,7 +238,9 @@ inline bool xidx_lookup_fragment(
     int64_t corpus_pos_end,
     const std::string& context_scope,
     std::string& out_doc_id,
-    std::string& out_xml_fragment
+    std::string& out_xml_fragment,
+    int64_t kwic_corpus_lo = -1,
+    int64_t kwic_corpus_hi = -1
 ) {
     static std::mutex mu;
     static std::unordered_map<std::string, std::unordered_map<int64_t, XidxTokenRec>> token_cache;
@@ -283,6 +286,48 @@ inline bool xidx_lookup_fragment(
     auto& region_types = region_types_cache[region_types_tbl];
     auto& region_ids = region_ids_cache[region_ids_tbl];
     if (tmap.empty() || docs.empty()) return false;
+
+    // KWIC-aligned slice: union of xml byte spans for every token with corpus_pos in
+    // [kwic_corpus_lo, kwic_corpus_hi] (same document). May be ill-formed XML at the edges.
+    if (kwic_corpus_lo >= 0 && kwic_corpus_hi >= kwic_corpus_lo) {
+        auto it0 = tmap.find(corpus_pos_start);
+        if (it0 == tmap.end() && corpus_pos_start > 0) it0 = tmap.find(corpus_pos_start - 1);
+        if (it0 == tmap.end()) it0 = tmap.find(corpus_pos_start + 1);
+        if (it0 != tmap.end()) {
+            const uint32_t ddoc = it0->second.doc_idx;
+            int64_t xs = -1;
+            int64_t xe = -1;
+            bool got = xml_bounds_for_corpus_range(by_doc, ddoc, kwic_corpus_lo, kwic_corpus_hi, xs, xe);
+            if (!got) {
+                const int64_t ms = std::min(corpus_pos_start, corpus_pos_end);
+                const int64_t me = std::max(corpus_pos_start, corpus_pos_end);
+                got = xml_bounds_for_corpus_range(by_doc, ddoc, ms, me, xs, xe);
+            }
+            if (got && ddoc < docs.size()) {
+                const std::string rel = docs[ddoc];
+                const std::string xml_path = project_root + "/" + rel;
+                std::ifstream xmlk(xml_path, std::ios::binary);
+                if (xmlk) {
+                    xmlk.seekg(0, std::ios::end);
+                    const auto xsize = xmlk.tellg();
+                    if (xs >= 0 && xe > xs && xe <= xsize) {
+                        xmlk.seekg(xs, std::ios::beg);
+                        std::string frag(static_cast<size_t>(xe - xs), '\0');
+                        xmlk.read(&frag[0], static_cast<std::streamsize>(frag.size()));
+                        if (!frag.empty()) {
+                            out_xml_fragment = frag;
+                            auto slash = rel.find_last_of('/');
+                            std::string base = (slash == std::string::npos) ? rel : rel.substr(slash + 1);
+                            if (base.size() > 4 && base.substr(base.size() - 4) == ".xml")
+                                base = base.substr(0, base.size() - 4);
+                            out_doc_id = base;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Fast path: if we have per-region-type fixed rng + xidx mapping files,
     // slice by those instead of heuristic widening over regions.bin.
@@ -647,6 +692,81 @@ inline bool xidx_lookup_fragment(
     return true;
 }
 
+/** TEITOK / flexicorp: when xidx has no per-sentence scopes, skip expensive full-document slices. */
+struct PandoFragmentEmitPolicy {
+    std::string context_scope{"s"};
+    bool include_xidx_fragment{true};
+    bool kwic_only_no_sentence_regions{false};
+    /** When set (no s/u xidx): slice source XML by KWIC token byte span, not region nodes. */
+    bool use_kwic_token_xml_span{false};
+};
+
+inline bool xidx_has_sentence_or_utterance_scopes(const std::string& project_root) {
+    std::string root = project_root;
+    while (!root.empty() && (root.back() == '/' || root.back() == '\\')) {
+        root.pop_back();
+    }
+    if (root.empty()) {
+        return true;
+    }
+    const std::string xidx = root + "/xidx";
+    auto pair_ok = [&xidx](const char* name) -> bool {
+        std::ifstream a(xidx + "/" + name + ".rng", std::ios::binary);
+        std::ifstream b(xidx + "/" + name + "_xidx.rng", std::ios::binary);
+        return static_cast<bool>(a && b);
+    };
+    return pair_ok("s") || pair_ok("u");
+}
+
+inline PandoFragmentEmitPolicy resolve_pando_fragment_emit_policy(
+    std::string context_scope,
+    const std::string& project_root,
+    std::string fragment_scope_override,
+    bool extract_fragments_requested
+) {
+    auto trim = [](std::string s) -> std::string {
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) {
+            s.pop_back();
+        }
+        size_t i = 0;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) {
+            ++i;
+        }
+        return s.substr(i);
+    };
+    fragment_scope_override = trim(std::move(fragment_scope_override));
+
+    PandoFragmentEmitPolicy pol;
+    if (!fragment_scope_override.empty()) {
+        for (auto& ch : fragment_scope_override) {
+            ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+        }
+        pol.context_scope = fragment_scope_override;
+        pol.include_xidx_fragment = extract_fragments_requested;
+        return pol;
+    }
+    if (context_scope.empty()) {
+        context_scope = "s";
+    }
+    for (auto& ch : context_scope) {
+        ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+    }
+    pol.context_scope = context_scope;
+    if (context_scope != "s") {
+        pol.include_xidx_fragment = extract_fragments_requested;
+        return pol;
+    }
+    if (extract_fragments_requested && !xidx_has_sentence_or_utterance_scopes(project_root)) {
+        pol.include_xidx_fragment = true;
+        pol.kwic_only_no_sentence_regions = true;
+        pol.use_kwic_token_xml_span = true;
+        pol.context_scope = context_scope;
+        return pol;
+    }
+    pol.include_xidx_fragment = extract_fragments_requested;
+    return pol;
+}
+
 inline std::string sanitize_xml_fragment_edges(const std::string& xml) {
     if (xml.empty()) return xml;
     std::string out = xml;
@@ -697,7 +817,9 @@ inline std::string to_flexicorp_json(
     const pando::TokenQuery& parsed_query,
     const std::string& index_dir = "",
     const std::string& context_scope = "s",
-    const std::string& xidx_project_root = ""
+    const std::string& xidx_project_root = "",
+    bool include_xidx_fragment = true,
+    const PandoFragmentEmitPolicy* fragment_policy_meta = nullptr
 ) {
     using namespace pando;
 
@@ -748,14 +870,30 @@ inline std::string to_flexicorp_json(
         auto doc_id = std::string(lookup_doc_id(corpus, match_start));
         std::string xidx_fragment;
         std::string xidx_doc_id;
-        if (xidx_lookup_fragment(
+        int64_t kw_span_lo = -1;
+        int64_t kw_span_hi = -1;
+        if (fragment_policy_meta && fragment_policy_meta->use_kwic_token_xml_span) {
+            const int kw = std::max(0, opts.context);
+            const CorpusPos csize = corpus.size();
+            const CorpusPos lo =
+                (match_start > static_cast<CorpusPos>(kw)) ? match_start - static_cast<CorpusPos>(kw) : CorpusPos(0);
+            const CorpusPos hi = (csize > 0)
+                ? std::min(csize - static_cast<CorpusPos>(1), match_end + static_cast<CorpusPos>(kw))
+                : match_end;
+            kw_span_lo = static_cast<int64_t>(lo);
+            kw_span_hi = static_cast<int64_t>(hi);
+        }
+        if (include_xidx_fragment &&
+            xidx_lookup_fragment(
                 index_dir,
                 xidx_project_root,
                 static_cast<int64_t>(match_start),
                 static_cast<int64_t>(match_end),
                 context_scope,
                 xidx_doc_id,
-                xidx_fragment
+                xidx_fragment,
+                kw_span_lo,
+                kw_span_hi
             )) {
             if (doc_id.empty()) doc_id = xidx_doc_id;
         }
@@ -859,6 +997,15 @@ inline std::string to_flexicorp_json(
     }
 
     out << "\n      ],\n";
+    if (fragment_policy_meta && fragment_policy_meta->kwic_only_no_sentence_regions) {
+        const char* reason = fragment_policy_meta->use_kwic_token_xml_span
+            ? "no_sentence_or_utterance_regions_kwic_token_xml_span"
+            : "no_sentence_or_utterance_regions_kwic_only";
+        out << "      \"fragment_context_policy\": {"
+            << "\"downgraded\": true, "
+            << "\"reason\": \"" << reason << "\""
+            << "},\n";
+    }
     out << "      \"result_type\": \"hits\"\n";
     out << "    },\n";
     out << "    \"warnings\": [],\n";
