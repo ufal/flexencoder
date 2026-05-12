@@ -13,6 +13,7 @@
 #include "core/json_utils.h"
 #include "flexicorp_json.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -165,7 +166,11 @@ char* flexicorp_pando_query(
         const std::string qstr(query);
         // Program commands (e.g. "; freq by lemma;") are ignored by run_single_query,
         // so dispatch those via the full program API to get native table output.
-        if (qstr.find(';') != std::string::npos) {
+        //
+        // Aligned "with ... ::" should run through run_single_query + to_flexicorp_json,
+        // which now serializes MatchSet.parallel_matches as result.pairs.
+        const bool has_program_commands = (qstr.find(';') != std::string::npos);
+        if (has_program_commands) {
             pando::ProgramOptions popts;
             popts.limit = opts.limit;
             popts.offset = opts.offset;
@@ -175,11 +180,70 @@ char* flexicorp_pando_query(
             popts.group_limit = 1000;
             popts.attrs = opts.attrs;
             popts.strict_quoted_strings = false;
+            // CLI fallback transport for collocation ProgramOptions (daemon JSON path
+            // already sets these directly on ProgramOptions).
+            auto env_to_int = [](const char* key, int defv) -> int {
+                const char* raw = std::getenv(key);
+                if (!raw || !*raw) return defv;
+                char* endp = nullptr;
+                long v = std::strtol(raw, &endp, 10);
+                if (endp == raw) return defv;
+                return static_cast<int>(v);
+            };
+            const int coll_left = env_to_int("FLEXICORP_PANDO_COLL_LEFT", -1);
+            const int coll_right = env_to_int("FLEXICORP_PANDO_COLL_RIGHT", -1);
+            const int coll_min_freq = env_to_int("FLEXICORP_PANDO_COLL_MIN_FREQ", -1);
+            const int coll_max_items = env_to_int("FLEXICORP_PANDO_COLL_MAX_ITEMS", -1);
+            const int coll_stoplist = env_to_int("FLEXICORP_PANDO_COLL_STOPLIST", -1);
+            if (coll_left >= 0) popts.coll_left = coll_left;
+            if (coll_right >= 0) popts.coll_right = coll_right;
+            if (coll_min_freq >= 0) popts.coll_min_freq = static_cast<size_t>(coll_min_freq);
+            if (coll_max_items >= 1) popts.coll_max_items = static_cast<size_t>(coll_max_items);
+            if (coll_stoplist >= 0) popts.coll_stoplist = static_cast<size_t>(coll_stoplist);
+            if (const char* cm = std::getenv("FLEXICORP_PANDO_COLL_MEASURES")) {
+                std::string measures(cm);
+                if (!measures.empty()) {
+                    popts.coll_measures.clear();
+                    size_t pos = 0;
+                    while (pos <= measures.size()) {
+                        size_t comma = measures.find(',', pos);
+                        std::string part = (comma == std::string::npos)
+                            ? measures.substr(pos)
+                            : measures.substr(pos, comma - pos);
+                        size_t s = part.find_first_not_of(" \t\r\n");
+                        size_t e = part.find_last_not_of(" \t\r\n");
+                        if (s != std::string::npos && e != std::string::npos) {
+                            popts.coll_measures.push_back(part.substr(s, e - s + 1));
+                        }
+                        if (comma == std::string::npos) break;
+                        pos = comma + 1;
+                    }
+                }
+            }
             std::string json = pando::run_program_json(ctx->corpus, ctx->program_session, qstr, popts);
             return to_c_str(flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query"));
         } else {
-            auto parsed_query = flexicorp_pando::parse_query_for_groups(query);
-            auto [ms, elapsed] = pando::run_single_query(ctx->corpus, query, opts);
+            pando::Parser parser(qstr);
+            pando::Program prog = parser.parse();
+            const bool is_parallel_query = (!prog.empty() && prog[0].has_query && prog[0].is_parallel);
+            pando::TokenQuery parsed_query = is_parallel_query ? prog[0].query : flexicorp_pando::parse_query_for_groups(query);
+            pando::MatchSet ms;
+            double elapsed = 0.0;
+            if (is_parallel_query) {
+                pando::QueryExecutor executor(ctx->corpus);
+                const size_t max_m = (opts.max_total > 0)
+                    ? opts.max_total
+                    : (opts.offset + opts.limit);
+                const bool count_t = opts.total;
+                auto t0 = std::chrono::high_resolution_clock::now();
+                ms = executor.execute_parallel(prog[0].query, prog[0].target_query, max_m, count_t);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                elapsed = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            } else {
+                auto single = pando::run_single_query(ctx->corpus, query, opts);
+                ms = std::move(single.first);
+                elapsed = single.second;
+            }
             std::string json = flexicorp_pando::to_flexicorp_json(
                 ctx->corpus,
                 query,

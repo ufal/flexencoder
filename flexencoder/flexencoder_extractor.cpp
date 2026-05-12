@@ -50,6 +50,17 @@ std::string ascii_lower(std::string s) {
     return s;
 }
 
+std::string normalize_conllu_placeholder(
+    const FlexConfig& cfg,
+    const std::string& key,
+    const std::string& value
+) {
+    if (!cfg.conllu_underscore_as_empty) return value;
+    if (value != "_") return value;
+    if (cfg.conllu_underscore_keep_keys.count(key) > 0) return value;
+    return "";
+}
+
 /** fieldtype contains a tag requesting `--kv-pipe` indexing for this column (pando-index). */
 bool fieldtype_implies_kv_pipe_index(const std::string& ft) {
     if (ft.empty()) return false;
@@ -335,6 +346,7 @@ FlexExtractor::FlexExtractor(const FlexConfig& cfg) : cfg_(cfg) {
     // Token columns must match CQP: same keys as <cqp><pattributes> (no implicit UD upos/xpos/deprel).
     cfg_.pando_jsonl2_positional.clear();
     cfg_.pando_jsonl2_multivalue.clear();
+    cfg_.pando_multivalue_separators.clear();
     cfg_.pando_jsonl2_nested.clear();
     cfg_.pando_jsonl2_overlapping.clear();
     cfg_.pando_jsonl2_zerowidth.clear();
@@ -350,7 +362,24 @@ FlexExtractor::FlexExtractor(const FlexConfig& cfg) : cfg_(cfg) {
     }
 
     for (const auto& pa : pattrs_) {
-        if (pa.multivalue) cfg_.pando_jsonl2_multivalue.push_back(pa.key);
+        if (pa.multivalue) {
+            cfg_.pando_jsonl2_multivalue.push_back(pa.key);
+            if (cfg_.pando_multivalue_separators.find(pa.key) == cfg_.pando_multivalue_separators.end()) {
+                cfg_.pando_multivalue_separators[pa.key] = ",";
+            }
+        }
+    }
+    // Structural attrs can also be multivalue (common TEITOK pattern: mval on sattributes).
+    // Export as "<struct_key>_<attr_key>" to match emitted region attribute names
+    // (e.g. text_family, s_tuid) and CWB/registry naming.
+    for (const auto& sa : sattrs_) {
+        if (sa.key.empty()) continue;
+        for (const auto& ai : sa.attrs) {
+            if (!ai.multivalue || ai.key.empty()) continue;
+            const std::string mk = sa.key + "_" + ai.key;
+            cfg_.pando_jsonl2_multivalue.push_back(mk);
+            cfg_.pando_multivalue_separators[mk] = ai.multisep.empty() ? "," : ai.multisep;
+        }
     }
 
     // Region nesting/overlap/zero-width mode declarations.
@@ -573,10 +602,19 @@ void FlexExtractor::load_pattributes() {
     }
 
     // Optional legacy defaults in the in-memory list only (mirrors CwbWriter::begin_corpus).
+    // Keep this internal only: do not mutate settings.xml, but ensure runtime compatibility.
     auto has_key = [](const std::vector<PAttribute>& v, const char* k) {
         return std::find_if(v.begin(), v.end(),
                             [k](const PAttribute& p) { return p.key == k; }) != v.end();
     };
+    if (!has_key(pattrs_, "form")) {
+        PAttribute pa;
+        pa.key = "form";
+        // If cqp/@wordfld differs from "form", map implicit form to that source field.
+        // calc_form() still applies inherit fallback (form -> pform) when needed.
+        pa.xml_attr = wordfld_;
+        pattrs_.insert(pattrs_.begin(), std::move(pa));
+    }
     if (!has_key(pattrs_, "word")) {
         PAttribute pa;
         pa.key = "word";
@@ -628,6 +666,7 @@ void FlexExtractor::load_sattributes() {
             ai.key = k;
             if (sub.attribute("xpath")) ai.xpath = sub.attribute("xpath").value();
             if (sub.attribute("external")) ai.external = sub.attribute("external").value();
+            if (sub.attribute("exfile")) ai.exfile = sub.attribute("exfile").value();
 
             // Multivalue flag for region/named attribute fields (header-only for now).
             auto attr_multivalue = [&](const char* name) -> bool {
@@ -754,6 +793,7 @@ std::string FlexExtractor::eval_sattr_item(
     const std::string& key = item.key;
     const std::string& xpath = item.xpath;
     const std::string& external = item.external;
+    const std::string& exfile_default = item.exfile;
     const bool want_multi = (item.values_mode == "multi");
     std::string valsep = item.multisep.empty() ? "," : item.multisep;
 
@@ -807,6 +847,7 @@ std::string FlexExtractor::eval_sattr_item(
             exfile = ref_str.substr(0, hash);
             extid = (hash + 1 < ref_str.size()) ? ref_str.substr(hash + 1) : "";
         }
+        if (exfile.empty() && !exfile_default.empty()) exfile = exfile_default;
         if (extid.empty()) return "";
 
         std::string extxpath = "//*[@id=\"" + xpath_escape_id(extid) + "\" or @xml:id=\"" + xpath_escape_id(extid) + "\"]";
@@ -875,6 +916,7 @@ std::string FlexExtractor::eval_sattr_item(
             id_only = ext_ref;
         }
     }
+    if (exfile_r.empty() && !exfile_default.empty()) exfile_r = exfile_default;
     if (id_only.empty()) return "";
     id_only = replace_all(id_only, "&", "&amp;");
     id_only = replace_all(id_only, ">", "&gt;");
@@ -1132,6 +1174,7 @@ void FlexExtractor::treat_file(
                 formval = calc_form(node, fld);
             }
             formval = trim(replace_all(formval, "\n", " "));
+            formval = normalize_conllu_placeholder(cfg_, pa.key, formval);
             tok.attrs[pa.key] = formval;
         }
         tok.attrs["inner_text"] = normalize_tok_inner_text(node);

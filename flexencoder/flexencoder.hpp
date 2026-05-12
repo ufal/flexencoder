@@ -52,6 +52,8 @@ struct FlexConfig {
     /** Header `structural` list (flexdecoder fills from CWB .rng struct names). */
     std::vector<std::string> pando_jsonl2_structural;
     std::vector<std::string> pando_jsonl2_multivalue;     // optional (header-only)
+    /** Optional separator per multivalue field key (default: ","). Keys include token attrs and region attrs like text_family. */
+    std::unordered_map<std::string, std::string> pando_multivalue_separators;
     std::vector<std::string> pando_jsonl2_nested;        // struct types
     std::vector<std::string> pando_jsonl2_overlapping;   // struct types
     std::vector<std::string> pando_jsonl2_zerowidth;      // struct types
@@ -93,6 +95,18 @@ struct FlexConfig {
 
     /** Optional: CWB registry corpus id (e.g. flexdecoder sets from registry ID line). */
     std::string corpus_id;
+
+    // ---------------------------------------------------------- CoNLL-U cleanup
+    /**
+     * Treat literal "_" as an empty/missing value for token attributes.
+     * Useful for CoNLL-U imports where "_" is a placeholder for null.
+     */
+    bool conllu_underscore_as_empty{false};
+    /**
+     * Attribute keys that should keep literal "_" even when
+     * conllu_underscore_as_empty=true (default keeps form/lemma literal-safe).
+     */
+    std::unordered_set<std::string> conllu_underscore_keep_keys{"form", "lemma", "word"};
 };
 
 struct FlexDocumentMeta {
@@ -203,6 +217,7 @@ private:
         std::string key;
         std::string xpath;   // XPath to get value (in doc or in external node)
         std::string external; // XPath on context node yielding "file#id" or "#id" for lookup
+        std::string exfile; // Optional default external XML file when external yields only "id" or "#id"
         bool multivalue{false};
         /** Sub-item @type: "form" → use calc_form (inherit chain) on the region element. */
         std::string value_type;

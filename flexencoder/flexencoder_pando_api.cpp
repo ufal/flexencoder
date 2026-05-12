@@ -17,6 +17,17 @@
 #ifdef USE_PANDO_API
 #include "flexencoder_helpers.hpp"  // trim, etc.
 
+static std::string normalize_multivalue_with_sep(const std::string& v, const std::string& sep) {
+    if (v.empty() || sep.empty() || sep == "|") return v;
+    std::string out = v;
+    std::size_t pos = 0;
+    while ((pos = out.find(sep, pos)) != std::string::npos) {
+        out.replace(pos, sep.size(), "|");
+        pos += 1;
+    }
+    return out;
+}
+
 // Token attrs are exactly those produced by the extractor from cqpsettings <cqp><pattributes>
 // (xpath evaluated from each token node; no extra keys invented here).
 static std::unordered_map<std::string, std::string> build_pando_token_attrs(const FlexToken& tok) {
@@ -39,6 +50,16 @@ PandoApiWriter::PandoApiWriter(const std::string& output_dir)
 
 void PandoApiWriter::begin_corpus(const FlexConfig& cfg) {
     cfg_snapshot_ = cfg;
+    multivalue_fields_.clear();
+    multivalue_separators_.clear();
+    for (const auto& f : cfg_snapshot_.pando_jsonl2_multivalue) {
+        multivalue_fields_.insert(f);
+        auto it = cfg_snapshot_.pando_multivalue_separators.find(f);
+        multivalue_separators_[f] =
+            (it != cfg_snapshot_.pando_multivalue_separators.end() && !it->second.empty())
+                ? it->second
+                : ",";
+    }
 #ifdef USE_PANDO_API
     // Pre-flight: make failures readable when output dir permissions are wrong.
     // Pando's builder can throw later with low-context errors; we want to detect
@@ -173,6 +194,12 @@ void PandoApiWriter::flush_document() {
         }
 
         std::unordered_map<std::string, std::string> attrs = build_pando_token_attrs(bt.tok);
+        for (auto& kv : attrs) {
+            if (!multivalue_fields_.count(kv.first)) continue;
+            auto it = multivalue_separators_.find(kv.first);
+            const std::string sep = (it != multivalue_separators_.end()) ? it->second : ",";
+            kv.second = normalize_multivalue_with_sep(kv.second, sep);
+        }
 
         int sentence_head_id = -1;
         if (sentence_id != 0) {
@@ -196,8 +223,15 @@ void PandoApiWriter::flush_document() {
     // Regions: FlexRegion uses 1-based global_pos; convert to 0-based for Pando (see below).
     for (const auto& br : doc_regions_) {
         std::vector<std::pair<std::string, std::string>> rattrs;
-        for (const auto& kv : br.reg.attrs)
-            rattrs.emplace_back(kv.first, kv.second);
+        for (const auto& kv : br.reg.attrs) {
+            std::string v = kv.second;
+            if (multivalue_fields_.count(kv.first)) {
+                auto it = multivalue_separators_.find(kv.first);
+                const std::string sep = (it != multivalue_separators_.end()) ? it->second : ",";
+                v = normalize_multivalue_with_sep(v, sep);
+            }
+            rattrs.emplace_back(kv.first, v);
+        }
         if (!br.reg.id.empty()) {
             auto it = std::find_if(rattrs.begin(), rattrs.end(),
                 [](const std::pair<std::string, std::string>& p) { return p.first == "id"; });
@@ -229,7 +263,14 @@ void PandoApiWriter::end_document(const FlexDocumentMeta& doc) {
 
 void PandoApiWriter::end_corpus() {
 #ifdef USE_PANDO_API
-    builder_->finalize();
+    if (builder_) {
+        builder_->finalize();
+        // Some libpando builds have been observed to double-free during
+        // PandoIndexBuilder destruction after successful finalize().
+        // finalize() has already flushed index files; release ownership to
+        // avoid running the problematic destructor path at process shutdown.
+        (void)builder_.release();
+    }
     std::cout << "[flexencoder] Pando index written to " << output_dir_ << std::endl;
 #endif
 }

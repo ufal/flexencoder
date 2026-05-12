@@ -59,19 +59,8 @@ else()
 	)
 endif()
 
-# ── Daemon: flexicorp-pando-server ────────────────────────────────────────
-# Unix socket server — keeps corpora open, serves multiple PHP workers.
-add_executable(flexicorp-pando-server server.cpp)
-target_include_directories(flexicorp-pando-server
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${PANDO_DIR}/src
-)
-target_link_libraries(flexicorp-pando-server PRIVATE pando_api pando_core)
-find_package(Threads REQUIRED)
-target_link_libraries(flexicorp-pando-server PRIVATE Threads::Threads)
-
 # Optional: prefix install (e.g. cmake --install . --prefix /usr/local)
-install(TARGETS flexicorp_pando flexicorp-pando flexicorp-pando-server
+install(TARGETS flexicorp_pando flexicorp-pando
 	LIBRARY DESTINATION lib
 	RUNTIME DESTINATION bin
 )

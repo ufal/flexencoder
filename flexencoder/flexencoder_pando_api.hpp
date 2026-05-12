@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef USE_PANDO_API
@@ -44,6 +46,8 @@ private:
     std::vector<BufferedToken> doc_tokens_;
     std::vector<BufferedRegion> doc_regions_;
     std::string sentence_region_type_{"seg"};
+    std::unordered_set<std::string> multivalue_fields_;
+    std::unordered_map<std::string, std::string> multivalue_separators_;
 
     void flush_document();
 #endif

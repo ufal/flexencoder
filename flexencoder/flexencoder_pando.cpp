@@ -111,10 +111,31 @@ void PandoEventsWriter::close_output() {
 void PandoEventsWriter::begin_corpus(const FlexConfig& cfg) {
     cfg_snapshot_ = cfg;
     positional_ = cfg_snapshot_.pando_jsonl2_positional;
-    if (positional_.empty()) positional_ = {"form"};
+    if (positional_.empty()) {
+        positional_ = {"form"};
+    } else {
+        // form must always be indexed for query compatibility (even with custom positional lists).
+        bool has_form = false;
+        for (const auto& key : positional_) {
+            if (key == "form") {
+                has_form = true;
+                break;
+            }
+        }
+        if (!has_form) {
+            positional_.insert(positional_.begin(), "form");
+        }
+    }
 
     multivalue_token_fields_.clear();
     for (const auto& f : cfg_snapshot_.pando_jsonl2_multivalue) multivalue_token_fields_.insert(f);
+    multivalue_separators_.clear();
+    for (const auto& f : cfg_snapshot_.pando_jsonl2_multivalue) {
+        auto it = cfg_snapshot_.pando_multivalue_separators.find(f);
+        multivalue_separators_[f] = (it != cfg_snapshot_.pando_multivalue_separators.end() && !it->second.empty())
+            ? it->second
+            : ",";
+    }
     zerowidth_types_.clear();
     for (const auto& t : cfg_snapshot_.pando_jsonl2_zerowidth) zerowidth_types_.insert(t);
 
@@ -306,12 +327,14 @@ std::string PandoEventsWriter::token_head_tok_id(const FlexToken& tok,
     return find_any({"head_tok_id", "head", "head_id", "gov"});
 }
 
-static std::string normalize_multivalue(const std::string& v) {
+static std::string normalize_multivalue(const std::string& v, const std::string& sep) {
     if (v.empty()) return v;
-    std::string out;
-    out.reserve(v.size());
-    for (char c : v) {
-        out.push_back(c == ',' ? '|' : c);
+    if (sep.empty() || sep == "|") return v;
+    std::string out = v;
+    std::size_t pos = 0;
+    while ((pos = out.find(sep, pos)) != std::string::npos) {
+        out.replace(pos, sep.size(), "|");
+        pos += 1;
     }
     // Trim whitespace around pipes (best-effort, ASCII only).
     std::string trimmed;
@@ -366,7 +389,9 @@ void PandoEventsWriter::write_token_event(const FlexToken& tok) {
         }
 
         if (multivalue_token_fields_.count(key) && val != "_") {
-            val = normalize_multivalue(val);
+            const auto sit = multivalue_separators_.find(key);
+            const std::string sep = (sit != multivalue_separators_.end()) ? sit->second : ",";
+            val = normalize_multivalue(val, sep);
         }
 
         O() << ',';
@@ -391,11 +416,17 @@ void PandoEventsWriter::write_region_event(const std::string& struct_name,
     O() << ",\"end_pos\":" << end_pos0;
     O() << ",\"attrs\":{";
     bool first = true;
-    for (const auto& [k, v] : attrs) {
+    for (const auto& [k, vraw] : attrs) {
         if (!first) O() << ',';
         first = false;
         write_json_string(k);
         O() << ':';
+        std::string v = vraw;
+        if (multivalue_token_fields_.count(k) && v != "_") {
+            const auto sit = multivalue_separators_.find(k);
+            const std::string sep = (sit != multivalue_separators_.end()) ? sit->second : ",";
+            v = normalize_multivalue(v, sep);
+        }
         write_json_string(v);
     }
     O() << "}}\n";

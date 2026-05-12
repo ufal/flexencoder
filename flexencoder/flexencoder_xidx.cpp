@@ -12,7 +12,9 @@ namespace {
 
 // Packed on-disk layout for one token record (32 bytes).
 struct XidxTokenRecord {
-    std::uint64_t corpus_pos;  // FlexToken.global_pos (0-based)
+    // Pando / libpando use 0-based corpus positions (global_pos - 1). Store the same here so
+    // xidx token keys align with query hit positions. (Legacy indices wrote global_pos verbatim.)
+    std::uint64_t corpus_pos;
     std::uint32_t doc_idx;     // index into docs.tbl
     std::uint64_t xml_start;   // byte offset in XML file
     std::uint64_t xml_end;
@@ -24,8 +26,8 @@ struct XidxRegionRecord {
     std::uint32_t region_type_idx; // index into region_types.tbl
     std::uint32_t doc_idx;         // index into docs.tbl
     std::uint64_t seq_id;          // FlexRegion.seq_id (or 0)
-    std::uint64_t start_pos;       // first corpus_pos in region (inclusive)
-    std::uint64_t end_pos;         // last corpus_pos in region (inclusive)
+    std::uint64_t start_pos;       // first corpus_pos in region (inclusive), 0-based (legacy: 1-based)
+    std::uint64_t end_pos;         // last corpus_pos in region (inclusive), 0-based (legacy: 1-based)
     std::uint64_t xml_start;      // byte offset in XML file for region container
     std::uint64_t xml_end;        // byte offset end (exclusive) in XML file for region container
     std::uint32_t region_id_idx;   // index into region_ids.tbl, or 0xFFFFFFFF
@@ -127,7 +129,7 @@ void XidxWriter::begin_document(const FlexDocumentMeta& doc) {
 void XidxWriter::add_token(const FlexToken& tok) {
     if (!tokens_bin_) return;
     XidxTokenRecord rec;
-    rec.corpus_pos = tok.global_pos;
+    rec.corpus_pos = (tok.global_pos > 0) ? (tok.global_pos - static_cast<std::uint64_t>(1)) : 0;
     rec.doc_idx = current_doc_idx_;
     rec.xml_start = tok.xml_start;
     rec.xml_end = tok.xml_end;
@@ -139,12 +141,15 @@ void XidxWriter::add_region(const FlexRegion& reg) {
     if (!regions_bin_) return;
     const std::uint64_t rec_idx = regions_rec_count_;
     regions_rec_count_++;
+    const std::uint64_t sp0 =
+        (reg.start_pos > 0) ? (reg.start_pos - static_cast<std::uint64_t>(1)) : 0;
+    const std::uint64_t ep0 = (reg.end_pos > 0) ? (reg.end_pos - static_cast<std::uint64_t>(1)) : 0;
     XidxRegionRecord rec;
     rec.region_type_idx = intern_region_type(reg.type);
     rec.doc_idx = current_doc_idx_;
     rec.seq_id = reg.seq_id;
-    rec.start_pos = reg.start_pos;
-    rec.end_pos = reg.end_pos;
+    rec.start_pos = sp0;
+    rec.end_pos = ep0;
     rec.xml_start = reg.xml_start;
     rec.xml_end = reg.xml_end;
     rec.region_id_idx = intern_region_id(reg.id);
@@ -154,7 +159,7 @@ void XidxWriter::add_region(const FlexRegion& reg) {
     // Store per-type span -> record-index mapping for per-region-type fixed xidx.
     // We sort/write these files in end_corpus().
     per_type_entries_[reg.type].push_back(
-        PerTypeEntry{reg.start_pos, reg.end_pos, rec_idx}
+        PerTypeEntry{sp0, ep0, rec_idx}
     );
 }
 

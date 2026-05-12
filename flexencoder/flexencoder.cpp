@@ -18,6 +18,7 @@
 
 #include "pugixml.hpp"  // full type needed for FlexExtractor's unique_ptr<xml_document>
 #include "flexencoder.hpp"
+#include "functions.hpp"
 #include "flexencoder_cwb.hpp"
 #include "flexencoder_clickhouse.hpp"
 #include "flexencoder_pando.hpp"
@@ -154,9 +155,14 @@ static void print_usage(const char* argv0) {
         << "                  With Pando C++ API build also -> project_root/pando (direct index).\n"
         << "                  ClickHouse is opt-in (--output-clickhouse). Manatee: --output-vrt (VRT for encodevert).\n"
         << "  --verbose        Print progress (file and token count per document)\n";
+    std::cerr
+        << "  --conllu-underscore-as-empty   Treat literal '_' token values as empty (CoNLL-U placeholder)\n"
+        << "  --conllu-underscore-keep-keys K1,K2,...   Keys that keep literal '_' when the flag is set\n"
+        << "                  (default: form,lemma,word)\n";
 }
 
 int main(int argc, char** argv) {
+    try {
     FlexConfig cfg;
     std::string output_dir;
     std::string output_clickhouse;
@@ -208,6 +214,15 @@ int main(int argc, char** argv) {
             build_all = true;
         } else if (arg == "--verbose" || arg == "-v") {
             cfg.verbose = true;
+        } else if (arg == "--conllu-underscore-as-empty") {
+            cfg.conllu_underscore_as_empty = true;
+        } else if (arg == "--conllu-underscore-keep-keys" && i + 1 < argc) {
+            cfg.conllu_underscore_keep_keys.clear();
+            std::string raw = argv[++i];
+            for (const auto& part : split(raw, ",")) {
+                const std::string key = trim(part);
+                if (!key.empty()) cfg.conllu_underscore_keep_keys.insert(key);
+            }
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -373,4 +388,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     return 0;
+    } catch (const std::length_error& e) {
+        std::cerr << "[flexencoder] length_error: " << e.what() << std::endl;
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "[flexencoder] fatal: " << e.what() << std::endl;
+        return 1;
+    }
 }

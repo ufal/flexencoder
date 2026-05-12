@@ -60,6 +60,7 @@ private:
 
     std::vector<std::string> positional_;
     std::unordered_set<std::string> multivalue_token_fields_;
+    std::unordered_map<std::string, std::string> multivalue_separators_;
     std::unordered_set<std::string> zerowidth_types_;
 
     std::vector<FlexToken> doc_tokens_;
