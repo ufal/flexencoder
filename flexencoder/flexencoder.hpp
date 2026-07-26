@@ -238,6 +238,9 @@ private:
         bool nested_{false};
         bool overlapping_{false};
         bool zerowidth_{false};
+
+        /** When non-empty: XML attribute name for logical region id shared across fragments (corpid merge). */
+        std::string corpid_attr_;
     };
     std::vector<PAttribute> pattrs_;
     std::vector<SAttribute> sattrs_;

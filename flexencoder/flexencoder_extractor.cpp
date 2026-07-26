@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -99,6 +100,15 @@ struct DryRunAttrStat {
     std::vector<std::string> examples;
 };
 
+struct DryRunCorpidMergeStat {
+    std::string struct_type;
+    std::string corpid;
+    std::uint32_t fragment_count = 0;
+    std::uint64_t envelope_width = 0;
+    std::uint64_t fragment_union_width = 0;
+    bool has_gap_tokens = false;
+};
+
 struct DryRunState {
     std::size_t max_tokens = 0;   // 0 = unlimited
     std::size_t max_regions = 0;  // 0 = unlimited
@@ -120,6 +130,11 @@ struct DryRunState {
     // Per doc_id + struct_type, token corpus positions [start,end] for overlap/zero-width analysis.
     // Key: doc_id + "\x1E" + struct_type (unit separator).
     std::unordered_map<std::string, std::vector<std::pair<std::uint64_t, std::uint64_t>>> region_spans_by_doc_type;
+
+    // corpid merge diagnostics (see CORPID.md).
+    std::vector<DryRunCorpidMergeStat> corpid_merges;
+    std::uint64_t corpid_multi_fragment_groups = 0;
+    std::uint64_t corpid_gap_warnings = 0;
 };
 
 // Heuristic: value looks like a multivalue field (pipe-joined, etc.) used in TEITOK/CWB.
@@ -193,6 +208,156 @@ inline bool interval_crossing_overlap(std::uint64_t a1, std::uint64_t b1, std::u
     return interval_overlap(a1, b1, a2, b2) && !interval_nested_or_equal(a1, b1, a2, b2);
 }
 
+struct TokenFulltextEntry {
+    std::uint64_t pos;
+    std::string form;
+    std::string join;
+};
+
+std::string build_sentence_fulltext(
+    const std::vector<TokenFulltextEntry>& tokens,
+    std::uint64_t posa, std::uint64_t posb,
+    int nospace
+);
+
+struct RegionFragment {
+    FlexRegion reg;
+    std::string corpid;
+    std::string fragment_xml_id;
+};
+
+inline std::uint64_t interval_width(std::uint64_t a, std::uint64_t b) {
+    if (a > b) std::swap(a, b);
+    if (a == 0 && b == 0) return 0;
+    return b - a + 1;
+}
+
+inline std::uint64_t merged_interval_union_width(
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& spans
+) {
+    if (spans.empty()) return 0;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted = spans;
+    for (auto& p : sorted) {
+        if (p.first > p.second) std::swap(p.first, p.second);
+    }
+    std::sort(sorted.begin(), sorted.end());
+    std::uint64_t total = 0;
+    std::uint64_t cur_a = 0, cur_b = 0;
+    bool have = false;
+    for (const auto& p : sorted) {
+        if (!have) {
+            cur_a = p.first;
+            cur_b = p.second;
+            have = true;
+            continue;
+        }
+        if (p.first <= cur_b + 1) {
+            if (p.second > cur_b) cur_b = p.second;
+        } else {
+            total += cur_b - cur_a + 1;
+            cur_a = p.first;
+            cur_b = p.second;
+        }
+    }
+    if (have) total += cur_b - cur_a + 1;
+    return total;
+}
+
+static void emit_region_fragments(
+    const std::string& struct_key,
+    const std::string& corpid_attr,
+    std::vector<RegionFragment> fragments,
+    int doc_nospace,
+    const std::vector<TokenFulltextEntry>& doc_token_fulltext_info,
+    DryRunState* dry,
+    std::vector<std::unique_ptr<IFlexBackendWriter>>& writers,
+    const std::function<void(const std::string&, std::uint64_t, std::uint64_t)>& note_span
+) {
+    if (fragments.empty()) return;
+
+    auto emit_one = [&](const FlexRegion& reg) {
+        for (auto& w : writers) {
+            if (w) w->add_region(reg);
+        }
+    };
+
+    if (corpid_attr.empty()) {
+        for (const auto& f : fragments) emit_one(f.reg);
+        return;
+    }
+
+    std::map<std::string, std::vector<std::size_t>> groups;
+    std::vector<std::size_t> ungrouped;
+    for (std::size_t i = 0; i < fragments.size(); ++i) {
+        if (fragments[i].corpid.empty()) ungrouped.push_back(i);
+        else groups[fragments[i].corpid].push_back(i);
+    }
+
+    for (std::size_t i : ungrouped) emit_one(fragments[i].reg);
+
+    for (auto& kv : groups) {
+        const std::string& corpid_val = kv.first;
+        const std::vector<std::size_t>& idxs = kv.second;
+        if (idxs.size() == 1) {
+            FlexRegion reg = fragments[idxs[0]].reg;
+            reg.id = corpid_val;
+            if (!fragments[idxs[0]].fragment_xml_id.empty())
+                reg.attrs["fragment_id"] = fragments[idxs[0]].fragment_xml_id;
+            emit_one(reg);
+            continue;
+        }
+
+        std::uint64_t posa = 0, posb = 0;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> span_list;
+        std::vector<std::string> frag_ids;
+        for (std::size_t i : idxs) {
+            const FlexRegion& r = fragments[i].reg;
+            span_list.push_back({r.start_pos, r.end_pos});
+            if (!fragments[i].fragment_xml_id.empty()) frag_ids.push_back(fragments[i].fragment_xml_id);
+            if (posa == 0 || r.start_pos < posa) posa = r.start_pos;
+            if (r.end_pos > posb) posb = r.end_pos;
+        }
+
+        FlexRegion merged = fragments[idxs[0]].reg;
+        merged.id = corpid_val;
+        merged.start_pos = posa;
+        merged.end_pos = posb;
+
+        if (!frag_ids.empty()) {
+            std::string joined;
+            for (std::size_t j = 0; j < frag_ids.size(); ++j) {
+                if (j > 0) joined += ' ';
+                joined += frag_ids[j];
+            }
+            merged.attrs["fragment_id"] = std::move(joined);
+        }
+
+        if (struct_key == "s" || struct_key == "seg") {
+            merged.fulltext = build_sentence_fulltext(doc_token_fulltext_info, posa, posb, doc_nospace);
+        }
+
+        const std::uint64_t env_w = interval_width(posa, posb);
+        const std::uint64_t union_w = merged_interval_union_width(span_list);
+        const bool has_gap = env_w > union_w;
+
+        if (dry) {
+            DryRunCorpidMergeStat st;
+            st.struct_type = struct_key;
+            st.corpid = corpid_val;
+            st.fragment_count = static_cast<std::uint32_t>(idxs.size());
+            st.envelope_width = env_w;
+            st.fragment_union_width = union_w;
+            st.has_gap_tokens = has_gap;
+            dry->corpid_merges.push_back(std::move(st));
+            ++dry->corpid_multi_fragment_groups;
+            if (has_gap) ++dry->corpid_gap_warnings;
+        }
+
+        if (note_span) note_span(struct_key, posa, posb);
+        emit_one(merged);
+    }
+}
+
 // Token id refs from sameAs/corresp: "#w-1 #w-2", commas, or full URIs with fragment.
 inline void append_ref_ids_from_toklist_string(const std::string& wlist, std::vector<std::string>* out) {
     if (!out) return;
@@ -254,13 +419,6 @@ static std::string normalize_tok_inner_text(const pugi::xml_node& node) {
     }
     return inner_text;
 }
-
-// Token (pos, form, join) for sentence fulltext building
-struct TokenFulltextEntry {
-    std::uint64_t pos;
-    std::string form;
-    std::string join;
-};
 
 // Build sentence fulltext from token list for [posa, posb] with nospace/join rules.
 // nospace 0: space between every token. 1: no space if prev join=right or cur join=left. 2: no space if prev join=right. 3: no space if cur join=left.
@@ -645,6 +803,7 @@ void FlexExtractor::load_sattributes() {
         if (sa.level.empty()) sa.level = sa.key;
         if (item.attribute("toklist")) sa.toklist = item.attribute("toklist").value();
         else sa.toklist = "sameAs";
+        if (item.attribute("corpid")) sa.corpid_attr_ = item.attribute("corpid").value();
         sa.empty_ = (std::string(item.attribute("type").value()) == "empty") || item.attribute("empty");
 
         // Optional structure-mode flags for JSONL v2: nested/overlapping/zero-width.
@@ -1040,7 +1199,7 @@ void FlexExtractor::treat_file(
     };
     auto is_ignored_region_attr = [&](const std::string& n) -> bool {
         static const std::unordered_set<std::string> ignore = {
-            "id", "xml:id", "type", "corresp", "sameAs"
+            "id", "xml:id", "type", "corresp", "sameAs", "corpid"
         };
         return ignore.count(n) > 0;
     };
@@ -1299,6 +1458,7 @@ void FlexExtractor::treat_file(
                     for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att) {
                         std::string name = att->name();
                         if (is_ignored_region_attr(name)) continue;
+                        if (!sa.corpid_attr_.empty() && name == sa.corpid_attr_) continue;
                         std::string val = att->value();
                         auto& st = dry->observed_region_attrs[sa.key][name];
                         st.count++;
@@ -1355,8 +1515,11 @@ void FlexExtractor::treat_file(
                 if (reg.id.empty()) reg.id = el.attribute("xml:id").value();
                 reg.start_pos = posa;
                 reg.end_pos = posb;
-                for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att)
+                for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att) {
+                    const std::string aname = att->name();
+                    if (aname == sa.corpid_attr_) continue;
                     reg.attrs[att->name()] = att->value();
+                }
                 int off = el.offset_debug();
                 if (off > 0) reg.xml_start = static_cast<std::uint64_t>(off - 1);
                 std::ostringstream oss;
@@ -1370,6 +1533,9 @@ void FlexExtractor::treat_file(
         std::string tmpxpath = (sa.level == "tok[dtok]" || sa.level == "dtok") ? "dtok" : rel_tokxpath;
         bool use_tok_span = (sa.level == "tok" || sa.level == "tok[dtok]" || sa.level == "mtok");
 
+        std::vector<RegionFragment> pending_fragments;
+        pending_fragments.reserve(nodes.size());
+
         for (auto const& xn : nodes) {
             pugi::xml_node el = xn.node();
 
@@ -1379,6 +1545,7 @@ void FlexExtractor::treat_file(
                 for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att) {
                     std::string name = att->name();
                     if (is_ignored_region_attr(name)) continue;
+                    if (!sa.corpid_attr_.empty() && name == sa.corpid_attr_) continue;
                     std::string val = att->value();
                     auto& st = dry->observed_region_attrs[sa.key][name];
                     st.count++;
@@ -1515,10 +1682,25 @@ void FlexExtractor::treat_file(
                 if (!val.empty()) reg.attrs[ap.key] = val;
             }
 
-            for (auto& w : writers) {
-                if (w) w->add_region(reg);
-            }
+            RegionFragment frag;
+            frag.reg = std::move(reg);
+            if (!sa.corpid_attr_.empty() && el.attribute(sa.corpid_attr_.c_str()))
+                frag.corpid = el.attribute(sa.corpid_attr_.c_str()).value();
+            frag.fragment_xml_id = el_id;
+            if (frag.fragment_xml_id.empty()) frag.fragment_xml_id = el.attribute("xml:id").value();
+            pending_fragments.push_back(std::move(frag));
         }
+
+        emit_region_fragments(
+            sa.key,
+            sa.corpid_attr_,
+            std::move(pending_fragments),
+            doc_nospace,
+            doc_token_fulltext_info,
+            dry,
+            writers,
+            dry_note_span
+        );
     }
 
     // Stand-off annotations (e.g. Annotations/error_file.xml)
@@ -2118,6 +2300,29 @@ void FlexExtractor::run_dry_run() {
                 out << "\"nesting_or_duplicate_spans_observed_but_nested_not_set\"";
             }
             out << "]";
+            out << "}";
+        }
+    }
+    out << "]";
+    out << "},";
+
+    out << "\"corpid_hints\":{";
+    out << "\"multi_fragment_groups\":" << dry.corpid_multi_fragment_groups << ",";
+    out << "\"gap_token_warnings\":" << dry.corpid_gap_warnings << ",";
+    out << "\"groups\":[";
+    {
+        const std::size_t corpid_limit = 100;
+        const std::size_t corpid_count = std::min(corpid_limit, dry.corpid_merges.size());
+        for (std::size_t ci = 0; ci < corpid_count; ++ci) {
+            if (ci > 0) out << ",";
+            const auto& g = dry.corpid_merges[ci];
+            out << "{";
+            out << "\"struct_type\":\"" << json_escape(g.struct_type) << "\",";
+            out << "\"corpid\":\"" << json_escape(g.corpid) << "\",";
+            out << "\"fragment_count\":" << g.fragment_count << ",";
+            out << "\"envelope_width\":" << g.envelope_width << ",";
+            out << "\"fragment_union_width\":" << g.fragment_union_width << ",";
+            out << "\"has_gap_tokens\":" << (g.has_gap_tokens ? "true" : "false");
             out << "}";
         }
     }

@@ -37,6 +37,12 @@ Cross-check performed against the TEITOK source tree (e.g. `tt-cwb-encode.cpp`: 
 | **CLI surface** | tt uses `--key=value` for all options; flexencoder uses POSIX `--key value`. No `--debug=N`, `--test`, `--version` parity (use `--verbose` / `--dry-run`). |
 | **Unused tt globals** | `lemmafld` / `formTags` in `tt-cwb-encode.cpp` are **declared but unused** — nothing to port. |
 
+### flexencoder extensions (not in tt-cwb-encode)
+
+| Topic | Notes |
+|--------|--------|
+| **`corpid` fragment merge** | Opt-in per sattribute (`corpid="corpid"` on `<item>`). Multiple elements with the same attribute value merge to one region (contiguous envelope). See [`CORPID.md`](CORPID.md). |
+
 ### Remaining gaps (vs tt-cwb-encode or TEITOK ops)
 
 | Gap | Priority |
