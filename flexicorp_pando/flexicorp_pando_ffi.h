@@ -28,3 +28,20 @@ char* flexicorp_pando_info(flexicorp_pando_ctx_t* ctx);
 const char* flexicorp_pando_last_error(flexicorp_pando_ctx_t* ctx);
 
 void flexicorp_pando_free(void* p);
+
+char* flexicorp_pando_request(
+    flexicorp_pando_ctx_t* ctx,
+    const char* method,
+    const char* path,
+    const char* query,
+    const char* body,
+    int* out_status
+);
+
+const char* flexicorp_pando_build_string(void);
+
+const char* flexicorp_pando_build_json(void);
+
+size_t flexicorp_pando_busy(flexicorp_pando_ctx_t* ctx);
+
+double flexicorp_pando_idle_seconds(flexicorp_pando_ctx_t* ctx);

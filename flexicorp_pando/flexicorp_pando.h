@@ -16,6 +16,8 @@
 #ifndef FLEXICORP_PANDO_H
 #define FLEXICORP_PANDO_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,8 +28,9 @@ typedef struct flexicorp_pando_ctx flexicorp_pando_ctx_t;
 
 // ── Lifecycle ────────────────────────────────────────────────────────────
 
-// Return the API version (currently 1).  Callers can check this to detect
-// breaking changes.
+// Return the API version (2: flexicorp_pando_request + build_string;
+// 3: build_json, busy, idle_seconds; request runs pando::ServerApi).
+// Callers can check this to detect breaking changes.
 int flexicorp_pando_api_version(void);
 
 // Open a Pando corpus.  Accepts either:
@@ -90,8 +93,40 @@ const char* flexicorp_pando_last_error(flexicorp_pando_ctx_t* ctx);
 
 // ── Memory ───────────────────────────────────────────────────────────────
 
-// Free a string returned by flexicorp_pando_query() or _info().
+// Free a string returned by flexicorp_pando_query(), _info(), or _request().
 void flexicorp_pando_free(void* p);
+
+// ── HTTP-shaped dispatch (same contract as pando-server) ─────────────────
+
+// Run one request through pando::ServerApi (src/api/server_api.h), the code
+// pando-server runs: thread-safe, never throws. `path` may carry "?a=b" when
+// `query` is NULL/empty; `query` is percent-decoded.
+// method/path/query/body match pando-server (e.g. "POST", "/query", "", "{\"query\":…}").
+// On success, *out_status is the HTTP status and the return value is a JSON body
+// (caller frees with flexicorp_pando_free). On hard failure returns NULL and sets
+// last_error; *out_status may still be set when non-NULL.
+char* flexicorp_pando_request(
+    flexicorp_pando_ctx_t* ctx,
+    const char* method,
+    const char* path,
+    const char* query,
+    const char* body,
+    int* out_status
+);
+
+// Pando build identity string (e.g. "0.1.20 (v0.1.20-…, branch)"). Do not free.
+const char* flexicorp_pando_build_string(void);
+
+// {"version", "build", "commit", "branch", "build_string", "adapter_api_version",
+//  "features": [...]} of the linked pando. Static; do not free.  (api_version 3)
+const char* flexicorp_pando_build_json(void);
+
+// Requests in flight + background counts queued or running on this handle.
+// Close a handle only when this is 0 and no caller holds it.  (api_version 3)
+size_t flexicorp_pando_busy(flexicorp_pando_ctx_t* ctx);
+
+// Seconds since the last flexicorp_pando_request started (idle eviction).  (api_version 3)
+double flexicorp_pando_idle_seconds(flexicorp_pando_ctx_t* ctx);
 
 #ifdef __cplusplus
 }

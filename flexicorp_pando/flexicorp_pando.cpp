@@ -10,27 +10,41 @@
 
 #include "corpus/corpus.h"
 #include "api/query_json.h"
+#include "api/server_api.h"
+#include "core/build_info.h"
 #include "core/json_utils.h"
 #include "flexicorp_json.h"
 
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
-
+#include <utility>
 // ── Internal context ─────────────────────────────────────────────────────
 
 struct flexicorp_pando_ctx {
     pando::Corpus corpus;
+    // TEITOK path (flexicorp_pando_query with "; command"): its own session
     pando::ProgramSession program_session;
-    std::string      index_dir;           // resolved path
-    std::string      xidx_project_root;   // TEITOK project root for xidx/ (empty = derive from index_dir)
-    std::string      last_error;
-    std::mutex       mu;                  // guards concurrent queries (Corpus is not thread-safe)
+    std::mutex program_mu;  // only ProgramSession (mutable); Corpus reads are concurrent-safe
+    std::string index_dir;
+    std::string xidx_project_root;
+    std::string last_error;
+    std::mutex error_mu;    // last_error is written by concurrent calls
+    // The pando-server API in-process (routes, background totals, /run session):
+    // pando::ServerApi, the same code pando-server runs. Declared after `corpus`,
+    // so it is destroyed first (cancels and joins its background counts).
+    std::unique_ptr<pando::ServerApi> server;
+
+    void set_error(std::string msg) {
+        std::lock_guard<std::mutex> lock(error_mu);
+        last_error = std::move(msg);
+    }
 };
 
 // Global last-error for failures during open() (before a ctx exists).
@@ -84,7 +98,7 @@ static std::vector<std::string> parse_attrs(const char* attrs) {
 extern "C" {
 
 int flexicorp_pando_api_version(void) {
-    return 1;
+    return 3;
 }
 
 flexicorp_pando_ctx_t* flexicorp_pando_open(
@@ -94,7 +108,6 @@ flexicorp_pando_ctx_t* flexicorp_pando_open(
 ) {
     g_last_error.clear();
 
-    // Resolve index directory.
     std::string dir;
     if (index_dir && *index_dir) {
         dir = index_dir;
@@ -113,8 +126,15 @@ flexicorp_pando_ctx_t* flexicorp_pando_open(
 
     try {
         ctx->corpus.open(dir, preload != 0);
+        pando::ServerConfig cfg;
+        cfg.preload = preload != 0;
+        cfg.extra_server_fields = "\"embedded_in\": \"flexicorp_pando\"";
+        ctx->server = std::make_unique<pando::ServerApi>(ctx->corpus, std::move(cfg));
     } catch (const std::exception& e) {
         g_last_error = std::string("Failed to open corpus at ") + dir + ": " + e.what();
+        return nullptr;
+    } catch (...) {
+        g_last_error = std::string("Failed to open corpus at ") + dir + ": unknown error";
         return nullptr;
     }
 
@@ -137,8 +157,7 @@ char* flexicorp_pando_query(
     if (!ctx) return error_json("null context handle");
     if (!query || !*query) return error_json("empty query");
 
-    std::lock_guard<std::mutex> lock(ctx->mu);
-    ctx->last_error.clear();
+    ctx->set_error("");
 
     pando::QueryOptions opts;
     opts.offset    = static_cast<size_t>(std::max(0, offset));
@@ -220,7 +239,11 @@ char* flexicorp_pando_query(
                     }
                 }
             }
-            std::string json = pando::run_program_json(ctx->corpus, ctx->program_session, qstr, popts);
+            std::string json;
+            {
+                std::lock_guard<std::mutex> lock(ctx->program_mu);
+                json = pando::run_program_json(ctx->corpus, ctx->program_session, qstr, popts);
+            }
             return to_c_str(flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query"));
         } else {
             pando::Parser parser(qstr);
@@ -259,16 +282,18 @@ char* flexicorp_pando_query(
             return to_c_str(json);
         }
     } catch (const std::exception& e) {
-        ctx->last_error = e.what();
+        ctx->set_error(e.what());
         return error_json(e.what());
+    } catch (...) {
+        ctx->set_error("unknown error");
+        return error_json("unknown error");
     }
 }
 
 char* flexicorp_pando_info(flexicorp_pando_ctx_t* ctx) {
     if (!ctx) return error_json("null context handle");
 
-    std::lock_guard<std::mutex> lock(ctx->mu);
-    ctx->last_error.clear();
+    ctx->set_error("");
 
     try {
         using namespace pando;
@@ -295,8 +320,11 @@ char* flexicorp_pando_info(flexicorp_pando_ctx_t* ctx) {
         out << "}\n";
         return to_c_str(out.str());
     } catch (const std::exception& e) {
-        ctx->last_error = e.what();
+        ctx->set_error(e.what());
         return error_json(e.what());
+    } catch (...) {
+        ctx->set_error("unknown error");
+        return error_json("unknown error");
     }
 }
 
@@ -307,6 +335,76 @@ const char* flexicorp_pando_last_error(flexicorp_pando_ctx_t* ctx) {
 
 void flexicorp_pando_free(void* p) {
     std::free(p);
+}
+
+char* flexicorp_pando_request(
+    flexicorp_pando_ctx_t* ctx,
+    const char* method,
+    const char* path,
+    const char* query,
+    const char* body,
+    int* out_status
+) {
+    if (out_status) *out_status = 500;
+    if (!ctx || !ctx->server) {
+        g_last_error = "null context handle";
+        return nullptr;
+    }
+    if (!method || !*method || !path || !*path) {
+        ctx->set_error("method and path are required");
+        return nullptr;
+    }
+    try {
+        // the query string may also come inside the path ("/status?job=…")
+        std::string p(path);
+        std::string qs = query ? query : "";
+        if (qs.empty()) {
+            const size_t q = p.find('?');
+            if (q != std::string::npos) {
+                qs = p.substr(q + 1);
+                p.resize(q);
+            }
+        }
+        pando::ServerResponse r = ctx->server->handle(method, p, pando::parse_query_string(qs),
+                                                      body ? std::string(body) : std::string());
+        if (out_status) *out_status = r.status;
+        return to_c_str(r.body);
+    } catch (const std::exception& e) {   // handle() does not throw; allocation might
+        ctx->set_error(e.what());
+        return to_c_str(std::string("{\"ok\":false,\"error\":") + pando::jstr(e.what()) + "}\n");
+    } catch (...) {
+        ctx->set_error("unknown error");
+        return to_c_str(std::string("{\"ok\":false,\"error\":\"unknown error\"}\n"));
+    }
+}
+
+size_t flexicorp_pando_busy(flexicorp_pando_ctx_t* ctx) {
+    try {
+        return (ctx && ctx->server) ? ctx->server->busy() : 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+double flexicorp_pando_idle_seconds(flexicorp_pando_ctx_t* ctx) {
+    return (ctx && ctx->server) ? ctx->server->idle_seconds() : 0.0;
+}
+
+const char* flexicorp_pando_build_string(void) {
+    static const std::string s = pando::build_string();
+    return s.c_str();
+}
+
+const char* flexicorp_pando_build_json(void) {
+    static const std::string s = [] {
+        std::string f = "[";
+        const auto& feats = pando::ServerApi::features();
+        for (size_t i = 0; i < feats.size(); ++i) f += std::string(i ? ", " : "") + "\"" + feats[i] + "\"";
+        f += "]";
+        return "{" + pando::build_json_fields() + ", \"build_string\": " + pando::jstr(pando::build_string())
+               + ", \"adapter_api_version\": 3, \"features\": " + f + "}";
+    }();
+    return s.c_str();
 }
 
 } // extern "C"

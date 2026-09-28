@@ -45,8 +45,8 @@ $ffi = FFI::cdef(file_get_contents($header), $lib);
 // ── Check API version ────────────────────────────────────────────────────
 
 $version = $ffi->flexicorp_pando_api_version();
-if ($version !== 1) {
-    fwrite(STDERR, "Unexpected API version: $version (expected 1)\n");
+if ($version < 1) {
+    fwrite(STDERR, "Unexpected API version: $version (expected >= 1)\n");
     exit(1);
 }
 
