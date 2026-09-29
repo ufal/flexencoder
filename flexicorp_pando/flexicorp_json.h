@@ -9,12 +9,17 @@
 #include "query/executor.h"
 #include "query/parser.h"
 #include "core/json_utils.h"
+#include "core/mmap_file.h"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <sys/stat.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -78,40 +83,393 @@ inline std::string derive_project_root(const std::string& index_dir) {
     return p.substr(0, slash);
 }
 
-inline std::unordered_map<int64_t, XidxTokenRec> load_xidx_token_map(const std::string& tokens_bin) {
-    std::unordered_map<int64_t, XidxTokenRec> map;
-    std::ifstream in(tokens_bin, std::ios::binary);
-    if (!in) return map;
-    in.seekg(0, std::ios::end);
-    std::streamoff size = in.tellg();
-    in.seekg(0, std::ios::beg);
-    const size_t stride = (size > 0 && (size % 40) == 0) ? 40 : 32;
-    std::string rec(stride, '\0');
-    while (in.read(&rec[0], static_cast<std::streamsize>(stride))) {
-        XidxTokenRec tr;
-        if (stride == 32) {
-            tr.corpus_pos = i64le_at(rec, 0);
-            tr.doc_idx = u32le_at(rec, 8);
-            tr.xml_start = i64le_at(rec, 12);
-            tr.xml_end = i64le_at(rec, 20);
-        } else {
-            tr.corpus_pos = i64le_at(rec, 0);
-            tr.doc_idx = u32le_at(rec, 8);
-            tr.xml_start = i64le_at(rec, 16);
-            tr.xml_end = i64le_at(rec, 24);
-        }
-        if (tr.corpus_pos >= 0 && tr.xml_end >= tr.xml_start) map[tr.corpus_pos] = tr;
-    }
-    return map;
+// ── xidx files read in place (mmap) ─────────────────────────────────────
+//
+// tokens.bin (32- or 40-byte records: corpus_pos, doc_idx, xml_start, xml_end),
+// regions.bin (40- or 56-byte records), <scope>.rng + <scope>_xidx.rng and
+// region_ids.tbl are mapped, not loaded: what a lookup reads comes from the page
+// cache, which the OS can drop again. One index per xidx directory, kept while
+// its files are unchanged (a re-index is noticed by size / mtime / inode of
+// tokens.bin and regions.bin). Built in memory are only: the token order when
+// tokens.bin is not sorted by position (4 bytes per token), per region type /
+// scope used the spans sorted by start (20 bytes per region), and the line
+// offsets of region_ids.tbl (8 bytes per line).
+//
+// Semantics are those of the former in-memory maps: a position's record is the
+// last valid one for it in file order (records with corpus_pos < 0 or
+// xml_end < xml_start are ignored), and the narrowest region containing a
+// position wins, ties to the earliest record.
+//
+// flexencoder historically keyed tokens.bin by FlexToken.global_pos (1-based).
+// Pando hit positions are 0-based (global_pos - 1). Indices with no key 0 are
+// treated as legacy 1-based keys; callers pass Pando positions and we map before
+// lookup.
+
+inline uint32_t u32le_ptr(const unsigned char* p) {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
-// flexencoder historically keyed tokens.bin by FlexToken.global_pos (1-based). Pando hit positions are
-// 0-based (global_pos - 1). Indices with no key 0 are treated as legacy 1-based keys; callers pass
-// Pando positions and we map before lookup.
-inline bool xidx_keys_are_legacy_flexencoder_global_one_based(const std::unordered_map<int64_t, XidxTokenRec>& tmap) {
-    if (tmap.empty()) return false;
-    return tmap.find(0) == tmap.end();
+inline int64_t i64le_ptr(const unsigned char* p) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[i]) << (8 * i);
+    return static_cast<int64_t>(v);
 }
+
+class XidxIndex {
+public:
+    struct RegionHit {
+        int64_t start = -1, end = -1, xml_start = -1, xml_end = -1;
+        uint32_t region_id_idx = 0xFFFFFFFFu;
+        uint32_t doc_idx = 0;
+    };
+
+    /// The index of `xidx_dir` (shared; rebuilt when tokens.bin / regions.bin change,
+    /// which is checked at most once a second).
+    static std::shared_ptr<const XidxIndex> get(const std::string& xidx_dir) {
+        struct Entry {
+            std::shared_ptr<const XidxIndex> idx;
+            std::chrono::steady_clock::time_point checked;
+        };
+        static std::mutex mu;
+        static std::unordered_map<std::string, Entry> cache;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            auto it = cache.find(xidx_dir);
+            if (it != cache.end() && now - it->second.checked < std::chrono::seconds(1)) return it->second.idx;
+        }
+        const FileId tid = file_id(xidx_dir + "/tokens.bin");
+        const FileId rid = file_id(xidx_dir + "/regions.bin");
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            auto it = cache.find(xidx_dir);
+            if (it != cache.end() && it->second.idx->tokens_id_ == tid && it->second.idx->regions_id_ == rid) {
+                it->second.checked = now;
+                return it->second.idx;
+            }
+        }
+        // built outside the lock: other corpora's lookups do not wait for this one
+        std::shared_ptr<const XidxIndex> idx(new XidxIndex(xidx_dir, tid, rid));
+        std::lock_guard<std::mutex> lk(mu);
+        cache[xidx_dir] = Entry{idx, now};
+        return idx;
+    }
+
+    std::vector<std::string> docs;           // docs.tbl
+    std::vector<std::string> region_types;   // region_types.tbl
+
+    bool empty() const { return valid_tokens_ == 0; }
+    /// flexencoder's old 1-based keys: no record for position 0.
+    bool legacy_one_based() const { return valid_tokens_ > 0 && !token(0); }
+
+    /// The record for corpus position `pos` (the last valid one in file order).
+    std::optional<XidxTokenRec> token(int64_t pos) const {
+        if (pos < 0) return std::nullopt;
+        std::optional<XidxTokenRec> best;
+        for (size_t k = lower(pos); k < tok_n_; ++k) {
+            const size_t i = order_at(k);
+            if (tok_pos(i) != pos) break;
+            const XidxTokenRec r = tok_rec(i);
+            if (r.xml_end >= r.xml_start) best = r;   // later records win
+        }
+        return best;
+    }
+
+    /// XML byte span of the tokens with a position in [lo, hi] in document `doc`.
+    bool xml_bounds(uint32_t doc, int64_t lo, int64_t hi, int64_t& out_start, int64_t& out_end) const {
+        bool any = false;
+        int64_t xs = 0, xe = 0;
+        size_t k = lower(std::max<int64_t>(lo, 0));
+        while (k < tok_n_) {
+            const int64_t p = tok_pos(order_at(k));
+            if (p > hi) break;
+            std::optional<XidxTokenRec> r;   // the position's record: last valid of its run
+            for (; k < tok_n_ && tok_pos(order_at(k)) == p; ++k) {
+                const XidxTokenRec t = tok_rec(order_at(k));
+                if (t.xml_end >= t.xml_start) r = t;
+            }
+            if (!r || r->doc_idx != doc) continue;
+            if (!any) {
+                xs = r->xml_start;
+                xe = r->xml_end;
+                any = true;
+            } else {
+                xs = std::min(xs, r->xml_start);
+                xe = std::max(xe, r->xml_end);
+            }
+        }
+        if (!any) return false;
+        out_start = xs;
+        out_end = xe;
+        return true;
+    }
+
+    size_t region_id_count() const { return rid_off_.empty() ? 0 : rid_off_.size() - 1; }
+    std::string region_id(size_t i) const {
+        if (i + 1 >= rid_off_.size()) return {};
+        const char* d = static_cast<const char*>(region_ids_.data());
+        size_t a = rid_off_[i], b = rid_off_[i + 1];
+        if (b > a && d[b - 1] == '\n') --b;   // as std::getline: the newline goes, a '\r' stays
+        return std::string(d + a, b - a);
+    }
+
+    /// The narrowest region of `type_idx` in `doc_idx` containing `pos` (regions.bin).
+    bool region_span_for_pos(uint32_t type_idx, uint32_t doc_idx, int64_t pos, RegionHit& out) const {
+        if (!regions_.valid() || reg_n_ == 0) return false;
+        std::shared_ptr<const SortedSpans> t = type_spans(type_idx);
+        int64_t best = -1;
+        uint64_t best_w = std::numeric_limits<uint64_t>::max();
+        t->for_containing(pos, [&](uint32_t rec, uint64_t w) {
+            if (reg_u32(rec, 4) != doc_idx) return;
+            if (w < best_w || (w == best_w && static_cast<int64_t>(rec) < best)) {
+                best_w = w;
+                best = rec;
+            }
+        });
+        if (best < 0) return false;
+        const size_t r = static_cast<size_t>(best);
+        out.start = reg_i64(r, 16);
+        out.end = reg_i64(r, 24);
+        out.region_id_idx = reg_has_xml_ ? reg_u32(r, 48) : reg_u32(r, 32);
+        out.xml_start = reg_has_xml_ ? reg_i64(r, 32) : -1;
+        out.xml_end = reg_has_xml_ ? reg_i64(r, 40) : -1;
+        out.doc_idx = doc_idx;
+        return true;
+    }
+
+    /// <scope>.rng + <scope>_xidx.rng over a 56-byte regions.bin: the narrowest
+    /// entry containing `pos`. `*usable` = the scope has such files, all valid.
+    bool scope_entry_for_pos(const std::string& scope, int64_t pos, RegionHit& out, bool* usable) const {
+        std::shared_ptr<const ScopeRng> sr = scope_rng(scope);
+        *usable = sr && sr->valid;
+        if (!*usable) return false;
+        int64_t best = -1;
+        uint64_t best_w = std::numeric_limits<uint64_t>::max();
+        sr->spans.for_containing(pos, [&](uint32_t j, uint64_t w) {
+            if (w < best_w || (w == best_w && static_cast<int64_t>(j) < best)) {
+                best_w = w;
+                best = j;
+            }
+        });
+        if (best < 0) return false;
+        const size_t j = static_cast<size_t>(best);
+        const auto* rng = static_cast<const unsigned char*>(sr->rng.data());
+        const auto* xi = static_cast<const unsigned char*>(sr->xidx.data());
+        const size_t r = static_cast<size_t>(i64le_ptr(xi + j * 8));
+        out.start = i64le_ptr(rng + j * 16);
+        out.end = i64le_ptr(rng + j * 16 + 8);
+        out.doc_idx = reg_u32(r, 4);
+        out.xml_start = reg_i64(r, 32);
+        out.xml_end = reg_i64(r, 40);
+        out.region_id_idx = reg_u32(r, 48);
+        return true;
+    }
+
+private:
+    struct FileId {
+        int64_t size = -1, mtime_ns = 0;
+        uint64_t ino = 0;
+        bool operator==(const FileId& o) const { return size == o.size && mtime_ns == o.mtime_ns && ino == o.ino; }
+    };
+    static FileId file_id(const std::string& path) {
+        FileId f;
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0) return f;
+        f.size = static_cast<int64_t>(st.st_size);
+#if defined(__APPLE__)
+        f.mtime_ns = static_cast<int64_t>(st.st_mtimespec.tv_sec) * 1000000000 + st.st_mtimespec.tv_nsec;
+#else
+        f.mtime_ns = static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000 + st.st_mtim.tv_nsec;
+#endif
+        f.ino = static_cast<uint64_t>(st.st_ino);
+        return f;
+    }
+    static pando::MmapFile map(const std::string& path) {
+        try {
+            return pando::MmapFile::open(path);
+        } catch (...) {
+            return pando::MmapFile();
+        }
+    }
+
+    /// Spans sorted by start, with the widest width: the spans containing `pos`
+    /// start in [pos - max_width, pos].
+    struct SortedSpans {
+        std::vector<int64_t> starts, ends;
+        std::vector<uint32_t> ids;   // record / entry index
+        uint64_t max_width = 0;
+        void add(int64_t s, int64_t e, uint32_t id) {
+            starts.push_back(s);
+            ends.push_back(e);
+            ids.push_back(id);
+        }
+        void finish() {
+            std::vector<uint32_t> ord(ids.size());
+            for (size_t i = 0; i < ord.size(); ++i) ord[i] = static_cast<uint32_t>(i);
+            std::stable_sort(ord.begin(), ord.end(), [&](uint32_t a, uint32_t b) { return starts[a] < starts[b]; });
+            std::vector<int64_t> s2(ord.size()), e2(ord.size());
+            std::vector<uint32_t> i2(ord.size());
+            for (size_t k = 0; k < ord.size(); ++k) {
+                s2[k] = starts[ord[k]];
+                e2[k] = ends[ord[k]];
+                i2[k] = ids[ord[k]];
+                if (e2[k] >= s2[k])
+                    max_width = std::max<uint64_t>(max_width, static_cast<uint64_t>(e2[k] - s2[k]));
+            }
+            starts.swap(s2);
+            ends.swap(e2);
+            ids.swap(i2);
+        }
+        template <class F>
+        void for_containing(int64_t pos, F&& f) const {
+            // pos - max_width without overflow
+            const int64_t from = (max_width > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+                                  || pos < std::numeric_limits<int64_t>::min() + static_cast<int64_t>(max_width))
+                ? std::numeric_limits<int64_t>::min() : pos - static_cast<int64_t>(max_width);
+            size_t k = static_cast<size_t>(std::lower_bound(starts.begin(), starts.end(), from) - starts.begin());
+            for (; k < starts.size() && starts[k] <= pos; ++k) {
+                if (ends[k] < pos) continue;
+                f(ids[k], static_cast<uint64_t>(ends[k] - starts[k]));
+            }
+        }
+    };
+
+    struct ScopeRng {
+        pando::MmapFile rng, xidx;
+        SortedSpans spans;
+        bool valid = false;
+    };
+
+    XidxIndex(const std::string& dir, FileId tid, FileId rid) : dir_(dir), tokens_id_(tid), regions_id_(rid) {
+        docs = read_lines_file(dir + "/docs.tbl");
+        region_types = read_lines_file(dir + "/region_types.tbl");
+
+        tokens_ = map(dir + "/tokens.bin");
+        const size_t tsize = tokens_.size();
+        tok_stride_ = (tsize > 0 && tsize % 40 == 0) ? 40 : 32;
+        tok_n_ = tokens_.valid() ? tsize / tok_stride_ : 0;
+        bool sorted = true;
+        int64_t prev = std::numeric_limits<int64_t>::min();
+        for (size_t i = 0; i < tok_n_; ++i) {
+            const XidxTokenRec r = tok_rec(i);
+            if (r.corpus_pos < prev) sorted = false;
+            prev = r.corpus_pos;
+            if (r.corpus_pos >= 0 && r.xml_end >= r.xml_start) ++valid_tokens_;
+        }
+        if (!sorted) {   // the order by position (stable: file order among equal positions)
+            order_.resize(tok_n_);
+            for (size_t i = 0; i < tok_n_; ++i) order_[i] = static_cast<uint32_t>(i);
+            std::stable_sort(order_.begin(), order_.end(),
+                             [&](uint32_t a, uint32_t b) { return tok_pos(a) < tok_pos(b); });
+        }
+
+        regions_ = map(dir + "/regions.bin");
+        const size_t rsize = regions_.size();
+        reg_has_xml_ = rsize > 0 && rsize % 56 == 0;
+        reg_stride_ = reg_has_xml_ ? 56 : 40;
+        reg_n_ = regions_.valid() ? rsize / reg_stride_ : 0;
+
+        region_ids_ = map(dir + "/region_ids.tbl");
+        if (region_ids_.valid() && region_ids_.size() > 0) {
+            const char* d = static_cast<const char*>(region_ids_.data());
+            const size_t n = region_ids_.size();
+            rid_off_.push_back(0);
+            for (size_t i = 0; i < n; ++i)
+                if (d[i] == '\n') rid_off_.push_back(i + 1);
+            if (rid_off_.back() != n) rid_off_.push_back(n);   // a last line without a newline
+        }
+    }
+
+    size_t order_at(size_t k) const { return order_.empty() ? k : order_[k]; }
+    const unsigned char* tok_ptr(size_t i) const {
+        return static_cast<const unsigned char*>(tokens_.data()) + i * tok_stride_;
+    }
+    int64_t tok_pos(size_t i) const { return i64le_ptr(tok_ptr(i)); }
+    XidxTokenRec tok_rec(size_t i) const {
+        const unsigned char* p = tok_ptr(i);
+        XidxTokenRec r;
+        r.corpus_pos = i64le_ptr(p);
+        r.doc_idx = u32le_ptr(p + 8);
+        r.xml_start = i64le_ptr(p + (tok_stride_ == 32 ? 12 : 16));
+        r.xml_end = i64le_ptr(p + (tok_stride_ == 32 ? 20 : 24));
+        return r;
+    }
+    /// First k (in position order) whose position is >= pos.
+    size_t lower(int64_t pos) const {
+        size_t lo = 0, hi = tok_n_;
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            if (tok_pos(order_at(mid)) < pos) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+    uint32_t reg_u32(size_t r, size_t off) const {
+        return u32le_ptr(static_cast<const unsigned char*>(regions_.data()) + r * reg_stride_ + off);
+    }
+    int64_t reg_i64(size_t r, size_t off) const {
+        return i64le_ptr(static_cast<const unsigned char*>(regions_.data()) + r * reg_stride_ + off);
+    }
+
+    std::shared_ptr<const SortedSpans> type_spans(uint32_t type_idx) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = type_spans_.find(type_idx);
+        if (it != type_spans_.end()) return it->second;
+        auto t = std::make_shared<SortedSpans>();
+        for (size_t r = 0; r < reg_n_; ++r)
+            if (reg_u32(r, 0) == type_idx) t->add(reg_i64(r, 16), reg_i64(r, 24), static_cast<uint32_t>(r));
+        t->finish();
+        type_spans_[type_idx] = t;
+        return t;
+    }
+
+    std::shared_ptr<const ScopeRng> scope_rng(const std::string& scope) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = scope_rng_.find(scope);
+        if (it != scope_rng_.end()) return it->second;
+        std::shared_ptr<ScopeRng> sr;
+        const std::string rng_path = dir_ + "/" + scope + ".rng";
+        const std::string xidx_path = dir_ + "/" + scope + "_xidx.rng";
+        std::ifstream a(rng_path, std::ios::binary), b(xidx_path, std::ios::binary);
+        if (a && b) {   // (no files: no entry, the fast path is skipped)
+            sr = std::make_shared<ScopeRng>();
+            sr->rng = map(rng_path);
+            sr->xidx = map(xidx_path);
+            const size_t rs = sr->rng.size(), xs = sr->xidx.size();
+            const size_t n = rs / 16;
+            if (sr->rng.valid() && sr->xidx.valid() && rs % 16 == 0 && xs % 8 == 0 && xs / 8 == n && n > 0
+                && regions_.valid() && reg_has_xml_) {
+                sr->valid = true;
+                const auto* rng = static_cast<const unsigned char*>(sr->rng.data());
+                const auto* xi = static_cast<const unsigned char*>(sr->xidx.data());
+                for (size_t j = 0; j < n; ++j) {
+                    const uint64_t rec = static_cast<uint64_t>(i64le_ptr(xi + j * 8));
+                    if (rec >= reg_n_) {   // as before: one entry past regions.bin disables the scope
+                        sr->valid = false;
+                        break;
+                    }
+                    sr->spans.add(i64le_ptr(rng + j * 16), i64le_ptr(rng + j * 16 + 8), static_cast<uint32_t>(j));
+                }
+                if (sr->valid) sr->spans.finish();
+            }
+        }
+        scope_rng_[scope] = sr;
+        return sr;
+    }
+
+    std::string dir_;
+    FileId tokens_id_, regions_id_;
+    pando::MmapFile tokens_, regions_, region_ids_;
+    size_t tok_stride_ = 32, tok_n_ = 0, valid_tokens_ = 0;
+    std::vector<uint32_t> order_;   // empty: tokens.bin is sorted by position
+    size_t reg_stride_ = 40, reg_n_ = 0;
+    bool reg_has_xml_ = false;
+    std::vector<size_t> rid_off_;
+    mutable std::mutex mu_;
+    mutable std::unordered_map<uint32_t, std::shared_ptr<const SortedSpans>> type_spans_;
+    mutable std::unordered_map<std::string, std::shared_ptr<const ScopeRng>> scope_rng_;
+};
 
 inline int64_t xidx_token_lookup_key_from_pando_pos(int64_t pando_corpus_pos, bool legacy_one_based_xidx) {
     if (!legacy_one_based_xidx) return pando_corpus_pos;
@@ -134,117 +492,6 @@ inline int find_scope_type_idx(const std::vector<std::string>& region_types, con
     return -1;
 }
 
-// Pick the narrowest [rstart, rend] that contains corpus_pos so nested/overlapping
-// regions (e.g. paragraph vs sentence) resolve to the innermost sentence span.
-inline bool find_region_span_for_pos(
-    const std::string& regions_bin,
-    uint32_t type_idx,
-    uint32_t doc_idx,
-    int64_t corpus_pos,
-    int64_t& out_start,
-    int64_t& out_end,
-    uint32_t& out_region_id_idx,
-    int64_t& out_xml_start,
-    int64_t& out_xml_end
-) {
-    std::ifstream in(regions_bin, std::ios::binary);
-    if (!in) return false;
-
-    // Backward compatibility: older indices used 40-byte region records (no xml_start/xml_end).
-    // Newer indices write 56-byte records with xml_start/xml_end.
-    in.seekg(0, std::ios::end);
-    const std::streamoff fsize = in.tellg();
-    in.seekg(0, std::ios::beg);
-    const size_t stride40 = 40;
-    const size_t stride56 = 56;
-    const bool has_xml = (fsize > 0 && (static_cast<uint64_t>(fsize) % stride56) == 0);
-    const size_t stride = has_xml ? stride56 : stride40;
-
-    std::string rec(stride, '\0');
-    int64_t best_start = -1;
-    int64_t best_end = -1;
-    uint32_t best_region_id_idx = 0xFFFFFFFFu;
-    int64_t best_xml_start = -1;
-    int64_t best_xml_end = -1;
-    uint64_t best_width = std::numeric_limits<uint64_t>::max();
-    while (in.read(&rec[0], static_cast<std::streamsize>(stride))) {
-        const uint32_t rtype = u32le_at(rec, 0);
-        const uint32_t rdoc = u32le_at(rec, 4);
-        const int64_t rstart = i64le_at(rec, 16);
-        const int64_t rend = i64le_at(rec, 24);
-        const uint32_t rregion_id_idx = has_xml ? u32le_at(rec, 48) : u32le_at(rec, 32);
-        const int64_t rxml_start = has_xml ? i64le_at(rec, 32) : -1;
-        const int64_t rxml_end = has_xml ? i64le_at(rec, 40) : -1;
-        if (rtype != type_idx || rdoc != doc_idx) continue;
-        if (rstart <= corpus_pos && corpus_pos <= rend) {
-            const uint64_t width = (rend >= rstart)
-                ? static_cast<uint64_t>(static_cast<uint64_t>(rend) - static_cast<uint64_t>(rstart))
-                : 0;
-            if (width < best_width) {
-                best_width = width;
-                best_start = rstart;
-                best_end = rend;
-                best_region_id_idx = rregion_id_idx;
-                best_xml_start = rxml_start;
-                best_xml_end = rxml_end;
-            }
-        }
-    }
-    if (best_start < 0) return false;
-    out_start = best_start;
-    out_end = best_end;
-    out_region_id_idx = best_region_id_idx;
-    out_xml_start = best_xml_start;
-    out_xml_end = best_xml_end;
-    return true;
-}
-
-// Per-document token rows sorted by corpus_pos for range queries over [rstart, rend].
-inline std::unordered_map<uint32_t, std::vector<std::pair<int64_t, XidxTokenRec>>> build_doc_sorted_tokens(
-    const std::unordered_map<int64_t, XidxTokenRec>& tmap
-) {
-    std::unordered_map<uint32_t, std::vector<std::pair<int64_t, XidxTokenRec>>> by_doc;
-    by_doc.reserve(64);
-    for (const auto& kv : tmap) {
-        by_doc[kv.second.doc_idx].push_back({kv.first, kv.second});
-    }
-    for (auto& e : by_doc) {
-        auto& v = e.second;
-        std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-    }
-    return by_doc;
-}
-
-// XML byte span covering all tokens with corpus_pos in [rstart, rend] (inclusive), same doc.
-inline bool xml_bounds_for_corpus_range(
-    const std::unordered_map<uint32_t, std::vector<std::pair<int64_t, XidxTokenRec>>>& by_doc,
-    uint32_t doc_idx,
-    int64_t rstart,
-    int64_t rend,
-    int64_t& out_xml_start,
-    int64_t& out_xml_end
-) {
-    auto dit = by_doc.find(doc_idx);
-    if (dit == by_doc.end()) return false;
-    const auto& rows = dit->second;
-    auto lo = std::lower_bound(
-        rows.begin(),
-        rows.end(),
-        rstart,
-        [](const std::pair<int64_t, XidxTokenRec>& pr, int64_t val) { return pr.first < val; }
-    );
-    if (lo == rows.end() || lo->first > rend) return false;
-    int64_t xs = lo->second.xml_start;
-    int64_t xe = lo->second.xml_end;
-    for (auto j = lo; j != rows.end() && j->first <= rend; ++j) {
-        if (j->second.xml_start < xs) xs = j->second.xml_start;
-        if (j->second.xml_end > xe) xe = j->second.xml_end;
-    }
-    out_xml_start = xs;
-    out_xml_end = xe;
-    return true;
-}
-
 inline bool xidx_lookup_fragment(
     const std::string& index_dir,
     const std::string& xidx_project_root_override,
@@ -256,14 +503,6 @@ inline bool xidx_lookup_fragment(
     int64_t kwic_corpus_lo = -1,
     int64_t kwic_corpus_hi = -1
 ) {
-    static std::mutex mu;
-    static std::unordered_map<std::string, std::unordered_map<int64_t, XidxTokenRec>> token_cache;
-    static std::unordered_map<std::string, std::unordered_map<uint32_t, std::vector<std::pair<int64_t, XidxTokenRec>>>>
-        doc_tokens_cache;
-    static std::unordered_map<std::string, std::vector<std::string>> docs_cache;
-    static std::unordered_map<std::string, std::vector<std::string>> region_types_cache;
-    static std::unordered_map<std::string, std::vector<std::string>> region_ids_cache;
-
     // flexencoder always writes xidx under the TEITOK project root. When the Pando index lives
     // under a custom or nested path (pando/path), deriving root from index_dir points at the wrong
     // directory — pass explicit project root from the caller when available.
@@ -272,60 +511,38 @@ inline bool xidx_lookup_fragment(
     if (project_root.empty()) project_root = derive_project_root(index_dir);
     if (project_root.empty()) return false;
     const std::string xidx_dir = project_root + "/xidx";
-    const std::string tokens_bin = xidx_dir + "/tokens.bin";
-    const std::string regions_bin = xidx_dir + "/regions.bin";
-    const std::string docs_tbl = xidx_dir + "/docs.tbl";
-    const std::string region_types_tbl = xidx_dir + "/region_types.tbl";
-    const std::string region_ids_tbl = xidx_dir + "/region_ids.tbl";
 
-    std::lock_guard<std::mutex> lock(mu);
-    if (token_cache.find(tokens_bin) == token_cache.end()) {
-        token_cache[tokens_bin] = load_xidx_token_map(tokens_bin);
-    }
-    if (doc_tokens_cache.find(tokens_bin) == doc_tokens_cache.end()) {
-        doc_tokens_cache[tokens_bin] = build_doc_sorted_tokens(token_cache[tokens_bin]);
-    }
-    if (docs_cache.find(docs_tbl) == docs_cache.end()) {
-        docs_cache[docs_tbl] = read_lines_file(docs_tbl);
-    }
-    if (region_types_cache.find(region_types_tbl) == region_types_cache.end()) {
-        region_types_cache[region_types_tbl] = read_lines_file(region_types_tbl);
-    }
-    if (region_ids_cache.find(region_ids_tbl) == region_ids_cache.end()) {
-        region_ids_cache[region_ids_tbl] = read_lines_file(region_ids_tbl);
-    }
-    auto& tmap = token_cache[tokens_bin];
-    auto& by_doc = doc_tokens_cache[tokens_bin];
-    auto& docs = docs_cache[docs_tbl];
-    auto& region_types = region_types_cache[region_types_tbl];
-    auto& region_ids = region_ids_cache[region_ids_tbl];
-    if (tmap.empty() || docs.empty()) return false;
+    // the xidx files, mapped (shared by every lookup of this corpus; no lock held here)
+    const std::shared_ptr<const XidxIndex> xi = XidxIndex::get(xidx_dir);
+    const auto& docs = xi->docs;
+    const auto& region_types = xi->region_types;
+    if (xi->empty() || docs.empty()) return false;
 
-    const bool legacy_xidx = xidx_keys_are_legacy_flexencoder_global_one_based(tmap);
+    const bool legacy_xidx = xi->legacy_one_based();
 
     // KWIC-aligned slice: union of xml byte spans for every token with corpus_pos in
     // [kwic_corpus_lo, kwic_corpus_hi] (same document). May be ill-formed XML at the edges.
     if (kwic_corpus_lo >= 0 && kwic_corpus_hi >= kwic_corpus_lo) {
         const int64_t k_anchor =
             xidx_token_lookup_key_from_pando_pos(corpus_pos_start, legacy_xidx);
-        auto it0 = tmap.find(k_anchor);
-        if (it0 == tmap.end() && k_anchor > 0) it0 = tmap.find(k_anchor - 1);
-        if (it0 == tmap.end()) it0 = tmap.find(k_anchor + 1);
-        if (it0 != tmap.end()) {
-            const uint32_t ddoc = it0->second.doc_idx;
+        auto it0 = xi->token(k_anchor);
+        if (!it0 && k_anchor > 0) it0 = xi->token(k_anchor - 1);
+        if (!it0) it0 = xi->token(k_anchor + 1);
+        if (it0) {
+            const uint32_t ddoc = it0->doc_idx;
             int64_t xs = -1;
             int64_t xe = -1;
             const int64_t span_lo =
                 xidx_token_lookup_key_from_pando_pos(kwic_corpus_lo, legacy_xidx);
             const int64_t span_hi =
                 xidx_token_lookup_key_from_pando_pos(kwic_corpus_hi, legacy_xidx);
-            bool got = xml_bounds_for_corpus_range(by_doc, ddoc, span_lo, span_hi, xs, xe);
+            bool got = xi->xml_bounds(ddoc, span_lo, span_hi, xs, xe);
             if (!got) {
                 const int64_t ms =
                     xidx_token_lookup_key_from_pando_pos(std::min(corpus_pos_start, corpus_pos_end), legacy_xidx);
                 const int64_t me =
                     xidx_token_lookup_key_from_pando_pos(std::max(corpus_pos_start, corpus_pos_end), legacy_xidx);
-                got = xml_bounds_for_corpus_range(by_doc, ddoc, ms, me, xs, xe);
+                got = xi->xml_bounds(ddoc, ms, me, xs, xe);
             }
             if (got && ddoc < docs.size()) {
                 const std::string rel = docs[ddoc];
@@ -356,121 +573,24 @@ inline bool xidx_lookup_fragment(
     // Fast path: if we have per-region-type fixed rng + xidx mapping files,
     // slice by those instead of heuristic widening over regions.bin.
     if (context_scope != "tok" && context_scope != "dtok") {
-        struct PerTypeCache {
-            std::vector<int64_t> starts;
-            std::vector<int64_t> ends;
-            std::vector<uint32_t> doc_idxs;
-            std::vector<int64_t> xml_starts;
-            std::vector<int64_t> xml_ends;
-            std::vector<uint32_t> region_id_idxs;
-            bool valid{false};
-        };
-
-        static std::mutex pt_mu;
-        static std::unordered_map<std::string, PerTypeCache> pt_cache;
-
-        const std::string rng_path = xidx_dir + "/" + context_scope + ".rng";
-        const std::string xidx_path = xidx_dir + "/" + context_scope + "_xidx.rng";
-
-        std::ifstream rng_test(rng_path, std::ios::binary);
-        std::ifstream xidx_test(xidx_path, std::ios::binary);
-        if (rng_test && xidx_test) {
-            const std::string cache_key = rng_path + "|" + xidx_path;
-            std::lock_guard<std::mutex> pt_lock(pt_mu);
-            auto it_cache = pt_cache.find(cache_key);
-            if (it_cache == pt_cache.end()) {
-                auto read_whole = [](const std::string& p) -> std::string {
-                    std::ifstream in(p, std::ios::binary);
-                    if (!in) return {};
-                    in.seekg(0, std::ios::end);
-                    const auto size = in.tellg();
-                    if (size <= 0) return {};
-                    in.seekg(0, std::ios::beg);
-                    std::string blob(static_cast<size_t>(size), '\0');
-                    in.read(&blob[0], static_cast<std::streamsize>(blob.size()));
-                    return blob;
-                };
-
-                PerTypeCache c;
-                const std::string rng_blob = read_whole(rng_path);
-                const std::string xidx_blob = read_whole(xidx_path);
-                if (!rng_blob.empty() && !xidx_blob.empty()) {
-                    if ((rng_blob.size() % 16) == 0 && (xidx_blob.size() % 8) == 0) {
-                        const size_t n = rng_blob.size() / 16;
-                        if (xidx_blob.size() / 8 == n && n > 0) {
-                            // Load whole regions.bin once for this index_dir.
-                            const std::string regions_blob = read_whole(regions_bin);
-                            if (!regions_blob.empty()) {
-                                const size_t stride56 = 56;
-                                const size_t stride40 = 40;
-                                const size_t stride = (regions_blob.size() % stride56 == 0) ? stride56 : stride40;
-                                if (stride == stride56) {
-                                    c.starts.resize(n);
-                                    c.ends.resize(n);
-                                    c.doc_idxs.resize(n);
-                                    c.xml_starts.resize(n);
-                                    c.xml_ends.resize(n);
-                                    c.region_id_idxs.resize(n);
-
-                                    for (size_t j = 0; j < n; ++j) {
-                                        c.starts[j] = i64le_at(rng_blob, j * 16 + 0);
-                                        c.ends[j] = i64le_at(rng_blob, j * 16 + 8);
-                                        const uint64_t regions_rec_index =
-                                            static_cast<uint64_t>(i64le_at(xidx_blob, j * 8));
-                                        const size_t roff = static_cast<size_t>(regions_rec_index) * stride;
-                                        if (roff + stride > regions_blob.size()) {
-                                            c.valid = false;
-                                            break;
-                                        }
-                                        c.doc_idxs[j] = u32le_at(regions_blob, roff + 4);
-                                        c.xml_starts[j] = i64le_at(regions_blob, roff + 32);
-                                        c.xml_ends[j] = i64le_at(regions_blob, roff + 40);
-                                        c.region_id_idxs[j] = u32le_at(regions_blob, roff + 48);
-                                    }
-                                    c.valid = !c.starts.empty();
-                                }
-                            }
-                        }
-                    }
-                }
-                pt_cache[cache_key] = std::move(c);
-            }
-
-            auto& c = pt_cache[cache_key];
-            if (c.valid && !c.starts.empty()) {
-                // Mirror find_region_span_for_pos(regions.bin): among all <s> spans that contain
-                // corpus_pos, take the *narrowest* [start,end]. upper_bound-on-starts alone can pick
-                // a wide outer region when sentence-like regions nest or overlap in TEI — especially
-                // on parallel target tiers — producing fragments that omit the matched token.
-                auto pick_narrowest_sentence_idx = [&](int64_t pos) -> int {
-                    int best = -1;
-                    uint64_t best_width = std::numeric_limits<uint64_t>::max();
-                    for (size_t j = 0; j < c.starts.size(); ++j) {
-                        if (pos < c.starts[j] || pos > c.ends[j]) continue;
-                        const uint64_t width = (c.ends[j] >= c.starts[j])
-                            ? static_cast<uint64_t>(static_cast<uint64_t>(c.ends[j]) -
-                                                      static_cast<uint64_t>(c.starts[j]))
-                            : 0;
-                        if (width < best_width) {
-                            best_width = width;
-                            best = static_cast<int>(j);
-                        }
-                    }
-                    return best;
-                };
-
+        {
+            {
                 const int64_t adj_start =
                     xidx_token_lookup_key_from_pando_pos(corpus_pos_start, legacy_xidx);
                 const int64_t adj_end =
                     xidx_token_lookup_key_from_pando_pos(corpus_pos_end, legacy_xidx);
-                const int idx_start = pick_narrowest_sentence_idx(adj_start);
-                const int idx_end = pick_narrowest_sentence_idx(adj_end);
-                if (idx_start >= 0 && idx_end >= 0) {
-                    const uint32_t doc_start = c.doc_idxs[static_cast<size_t>(idx_start)];
-                    const uint32_t doc_end = c.doc_idxs[static_cast<size_t>(idx_end)];
+                // the narrowest entry of <scope>.rng containing each end (entries can nest
+                // or overlap in TEI, e.g. on parallel target tiers)
+                XidxIndex::RegionHit e_start, e_end;
+                bool usable = false;
+                const bool got_start = xi->scope_entry_for_pos(context_scope, adj_start, e_start, &usable);
+                const bool got_end = usable && xi->scope_entry_for_pos(context_scope, adj_end, e_end, &usable);
+                if (got_start && got_end) {
+                    const uint32_t doc_start = e_start.doc_idx;
+                    const uint32_t doc_end = e_end.doc_idx;
                     if (doc_start < docs.size() && doc_start == doc_end) {
-                        const int64_t frag_xml_start = c.xml_starts[static_cast<size_t>(idx_start)];
-                        const int64_t frag_xml_end = c.xml_ends[static_cast<size_t>(idx_end)];
+                        const int64_t frag_xml_start = e_start.xml_start;
+                        const int64_t frag_xml_end = e_end.xml_end;
                         const std::string rel = docs[doc_start];
                         const std::string xml_path = project_root + "/" + rel;
 
@@ -485,9 +605,9 @@ inline bool xidx_lookup_fragment(
                                 xml.read(&frag[0], static_cast<std::streamsize>(frag.size()));
                                 if (!frag.empty()) {
                                     if (context_scope == "s" || context_scope == "seg") {
-                                        const uint32_t ridx = c.region_id_idxs[static_cast<size_t>(idx_start)];
-                                        if (ridx < region_ids.size()) {
-                                            const std::string expected_id = region_ids[ridx];
+                                        const uint32_t ridx = e_start.region_id_idx;
+                                        if (ridx < xi->region_id_count()) {
+                                            const std::string expected_id = xi->region_id(ridx);
                                             const std::string id_pat = "id=\"" + expected_id + "\"";
                                             if (frag.find(id_pat) == std::string::npos) {
                                                 // Wrong boundaries: fall back to heuristic logic below.
@@ -523,11 +643,11 @@ inline bool xidx_lookup_fragment(
     // If one side was rebuilt without the other, keys can differ by ±1; try adjacent token records.
     const int64_t k_primary =
         xidx_token_lookup_key_from_pando_pos(corpus_pos_start, legacy_xidx);
-    auto it = tmap.find(k_primary);
-    if (it == tmap.end() && k_primary > 0) it = tmap.find(k_primary - 1);
-    if (it == tmap.end()) it = tmap.find(k_primary + 1);
-    if (it == tmap.end()) return false;
-    const XidxTokenRec& tr = it->second;
+    auto it = xi->token(k_primary);
+    if (!it && k_primary > 0) it = xi->token(k_primary - 1);
+    if (!it) it = xi->token(k_primary + 1);
+    if (!it) return false;
+    const XidxTokenRec tr = *it;
     const int64_t effective_pos = tr.corpus_pos;
     if (tr.doc_idx >= docs.size()) return false;
     const std::string rel = docs[tr.doc_idx];
@@ -538,23 +658,15 @@ inline bool xidx_lookup_fragment(
     std::string expected_sentence_region_id;
 
     const int scope_idx = find_scope_type_idx(region_types, context_scope);
-    if (scope_idx >= 0 && !regions_bin.empty()) {
-        int64_t rstart = -1;
-        int64_t rend = -1;
-        uint32_t region_id_idx = 0xFFFFFFFFu;
-        int64_t region_xml_start = -1;
-        int64_t region_xml_end = -1;
-        if (find_region_span_for_pos(
-                regions_bin,
-                static_cast<uint32_t>(scope_idx),
-                tr.doc_idx,
-                effective_pos,
-                rstart,
-                rend,
-                region_id_idx,
-                region_xml_start,
-                region_xml_end
-            )) {
+    XidxIndex::RegionHit rh;
+    if (scope_idx >= 0
+        && xi->region_span_for_pos(static_cast<uint32_t>(scope_idx), tr.doc_idx, effective_pos, rh)) {
+        {
+            const int64_t rstart = rh.start;
+            const int64_t rend = rh.end;
+            const uint32_t region_id_idx = rh.region_id_idx;
+            const int64_t region_xml_start = rh.xml_start;
+            const int64_t region_xml_end = rh.xml_end;
             // Include <u> (utterance): same stored xml_start/xml_end path as <s>, otherwise <u> scope
             // falls through to token-only bounds and fragments look like bare <tok>…</tok>.
             const bool want_region_xml_container = (
@@ -562,25 +674,25 @@ inline bool xidx_lookup_fragment(
                 || context_scope == "u");
             if (want_region_xml_container && region_xml_start >= 0 && region_xml_end > region_xml_start) {
                 // Exact region slicing: mirrors CWB where s.xidx already points to the container (<s> ... </s>).
-                if (region_id_idx != 0xFFFFFFFFu && region_id_idx < region_ids.size()) {
-                    expected_sentence_region_id = region_ids[region_id_idx];
+                if (region_id_idx != 0xFFFFFFFFu && region_id_idx < xi->region_id_count()) {
+                    expected_sentence_region_id = xi->region_id(region_id_idx);
                 }
                 frag_xml_start = std::min(region_xml_start, tr.xml_start);
                 frag_xml_end = std::max(region_xml_end, tr.xml_end);
             } else {
                 int64_t xs = frag_xml_start;
                 int64_t xe = frag_xml_end;
-                if (xml_bounds_for_corpus_range(by_doc, tr.doc_idx, rstart, rend, xs, xe)) {
+                if (xi->xml_bounds(tr.doc_idx, rstart, rend, xs, xe)) {
                     frag_xml_start = xs;
                     frag_xml_end = xe;
                 } else {
-                    auto st_it = tmap.find(rstart);
-                    if (st_it == tmap.end() && rstart > 0) st_it = tmap.find(rstart - 1);
-                    auto en_it = tmap.find(rend);
-                    if (en_it == tmap.end() && rend > 0) en_it = tmap.find(rend - 1);
-                    if (st_it != tmap.end() && en_it != tmap.end()) {
-                        frag_xml_start = st_it->second.xml_start;
-                        frag_xml_end = en_it->second.xml_end;
+                    auto st_it = xi->token(rstart);
+                    if (!st_it && rstart > 0) st_it = xi->token(rstart - 1);
+                    auto en_it = xi->token(rend);
+                    if (!en_it && rend > 0) en_it = xi->token(rend - 1);
+                    if (st_it && en_it) {
+                        frag_xml_start = st_it->xml_start;
+                        frag_xml_end = en_it->xml_end;
                     }
                 }
                 if (frag_xml_start > tr.xml_start || frag_xml_end < tr.xml_end) {
@@ -593,7 +705,7 @@ inline bool xidx_lookup_fragment(
                 // Expand by locating the region's start/end tag using the region id.
                 if (want_region_xml_container && region_id_idx != 0xFFFFFFFFu) {
                     std::string region_id;
-                    if (region_id_idx < region_ids.size()) region_id = region_ids[region_id_idx];
+                    if (region_id_idx < xi->region_id_count()) region_id = xi->region_id(region_id_idx);
                     const std::string tag =
                         region_types.empty() ? context_scope : region_types[static_cast<size_t>(scope_idx)];
                     if (!region_id.empty() && !tag.empty()) {

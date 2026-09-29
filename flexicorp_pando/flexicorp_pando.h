@@ -29,7 +29,8 @@ typedef struct flexicorp_pando_ctx flexicorp_pando_ctx_t;
 // ── Lifecycle ────────────────────────────────────────────────────────────
 
 // Return the API version (2: flexicorp_pando_request + build_string;
-// 3: build_json, busy, idle_seconds; request runs pando::ServerApi).
+// 3: build_json, busy, idle_seconds; request runs pando::ServerApi;
+// 4: flexicorp_pando_open_opts — server options: limits by tier, sessions, …).
 // Callers can check this to detect breaking changes.
 int flexicorp_pando_api_version(void);
 
@@ -47,6 +48,17 @@ flexicorp_pando_ctx_t* flexicorp_pando_open(
     const char* project_root,
     const char* index_dir,
     int preload
+);
+
+// As flexicorp_pando_open, with pando server options as JSON (NULL / "" = the
+// defaults; see pando's server_capi.h / wiki Embedding-the-Server): "preload",
+// "query_threads", "query_timeout_ms", "total_workers", sessions ("session_ttl",
+// "max_sessions", "session_memory_mb", "session_max_hits") and limits by tier
+// ("tiers": {"visitor": {...}, ...}, "default_tier", "trust_tier").  (api_version 4)
+flexicorp_pando_ctx_t* flexicorp_pando_open_opts(
+    const char* project_root,
+    const char* index_dir,
+    const char* options_json
 );
 
 // Close handle and free all associated memory.

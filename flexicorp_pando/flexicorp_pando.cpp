@@ -98,14 +98,11 @@ static std::vector<std::string> parse_attrs(const char* attrs) {
 extern "C" {
 
 int flexicorp_pando_api_version(void) {
-    return 3;
+    return 4;
 }
 
-flexicorp_pando_ctx_t* flexicorp_pando_open(
-    const char* project_root,
-    const char* index_dir,
-    int preload
-) {
+static flexicorp_pando_ctx_t* open_ctx(const char* project_root, const char* index_dir,
+                                       pando::ServerConfig cfg) {
     g_last_error.clear();
 
     std::string dir;
@@ -125,10 +122,9 @@ flexicorp_pando_ctx_t* flexicorp_pando_open(
     }
 
     try {
-        ctx->corpus.open(dir, preload != 0);
-        pando::ServerConfig cfg;
-        cfg.preload = preload != 0;
-        cfg.extra_server_fields = "\"embedded_in\": \"flexicorp_pando\"";
+        ctx->corpus.open(dir, cfg.preload);
+        if (cfg.extra_server_fields.empty())
+            cfg.extra_server_fields = "\"embedded_in\": \"flexicorp_pando\"";
         ctx->server = std::make_unique<pando::ServerApi>(ctx->corpus, std::move(cfg));
     } catch (const std::exception& e) {
         g_last_error = std::string("Failed to open corpus at ") + dir + ": " + e.what();
@@ -139,6 +135,30 @@ flexicorp_pando_ctx_t* flexicorp_pando_open(
     }
 
     return ctx.release();
+}
+
+flexicorp_pando_ctx_t* flexicorp_pando_open(
+    const char* project_root,
+    const char* index_dir,
+    int preload
+) {
+    pando::ServerConfig cfg;
+    cfg.preload = preload != 0;
+    return open_ctx(project_root, index_dir, std::move(cfg));
+}
+
+flexicorp_pando_ctx_t* flexicorp_pando_open_opts(
+    const char* project_root,
+    const char* index_dir,
+    const char* options_json
+) {
+    try {
+        pando::ServerConfig cfg = pando::parse_server_options(options_json ? options_json : "");
+        return open_ctx(project_root, index_dir, std::move(cfg));
+    } catch (const std::exception& e) {
+        g_last_error = std::string("flexicorp_pando_open_opts: ") + e.what();
+        return nullptr;
+    }
 }
 
 void flexicorp_pando_close(flexicorp_pando_ctx_t* ctx) {
