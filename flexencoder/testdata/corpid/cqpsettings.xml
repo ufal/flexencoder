@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ttsettings>
+  <cqp>
+    <pattributes>
+      <item key="form"/>
+      <item key="word"/>
+      <item key="id"/>
+    </pattributes>
+    <sattributes>
+      <item key="text" level="text"/>
+      <item key="p" level="p" corpid="corpid"/>
+      <item key="s" level="s" corpid="corpid"/>
+    </sattributes>
+  </cqp>
+</ttsettings>

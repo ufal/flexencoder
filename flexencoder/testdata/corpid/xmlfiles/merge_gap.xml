@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI>
+  <text id="merge_gap">
+    <p corpid="p-1" id="p-1a"><tok id="w-1" form="This"/> <tok id="w-2" form="is"/></p>
+    <p id="p-mid"><tok id="w-3" form="unrelated"/></p>
+    <p corpid="p-1" id="p-1b"><tok id="w-4" form="broken"/> <tok id="w-5" form="paragraph"/></p>
+  </text>
+</TEI>

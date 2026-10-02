@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI>
+  <text id="no_corpid">
+    <p id="p-a"><tok id="w-1" form="One"/></p>
+    <p id="p-b"><tok id="w-2" form="Two"/></p>
+  </text>
+</TEI>
