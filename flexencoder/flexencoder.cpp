@@ -124,9 +124,7 @@ static void print_usage(const char* argv0) {
         << "Usage: " << argv0
         << " [--project-root PATH] [--searchfolder xmlfiles] [--output DIR]"
         << " [--output-clickhouse DIR]"
-#ifdef USE_PANDO_API
         << " [--output-pando DIR]"
-#endif
         << " [--output-xidx DIR]"
         << " [--output-vrt PATH] [--output-pando-events PATH]"
         << " [--settings PATH] [--log PATH] [--all]\n"
@@ -136,6 +134,8 @@ static void print_usage(const char* argv0) {
         << "(docs, sentences, regions, toks, dep_edges) to DIR\n"
 #ifdef USE_PANDO_API
         << "  --output-pando DIR   Also build Pando index in DIR (C++ API; single walk, no subprocess)\n"
+#else
+        << "  --output-pando DIR   Also build Pando index in DIR (streams JSONL to pando-index on PATH)\n"
 #endif
         << "  --output-xidx DIR   Write backend-agnostic xidx files to DIR "
         << "(default: project_root/xidx)\n"
@@ -188,10 +188,9 @@ int main(int argc, char** argv) {
             output_dir = argv[++i];  // only add CwbWriter when this was passed
         } else if (arg == "--output-clickhouse" && i + 1 < argc) {
             output_clickhouse = argv[++i];
-#ifdef USE_PANDO_API
         } else if (arg == "--output-pando" && i + 1 < argc) {
+            // API build: index directly; otherwise stream JSONL to pando-index (PATH) into DIR
             output_pando = argv[++i];
-#endif
         } else if (arg == "--output-xidx" && i + 1 < argc) {
             output_xidx = argv[++i];
         } else if (arg == "--output-vrt" && i + 1 < argc) {
@@ -288,6 +287,25 @@ int main(int argc, char** argv) {
         }
 #endif
     }
+
+#ifndef USE_PANDO_API
+    // --output-pando DIR without the Pando C++ API: the same streaming to
+    // pando-index as --all, into DIR (flexicorp's reindex passes a staging dir)
+    if (!output_pando.empty()) {
+        pando_index_exe = find_executable_in_path("pando-index");
+        if (pando_index_exe.empty()) {
+            std::cerr << "[flexencoder] --output-pando " << output_pando
+                      << ": pando-index not found on PATH (build Pando and install pando-index, e.g. into /usr/local/bin)\n";
+            return 1;
+        }
+        pando_stream_to_index = true;
+        pando_stream_index_dir = output_pando;
+        pando_stream_fallback_jsonl = output_pando + ".events.jsonl";
+        std::cerr << "[flexencoder] Pando: streaming JSONL to " << pando_index_exe << " -> index "
+                  << pando_stream_index_dir << "\n";
+        output_pando.clear();
+    }
+#endif
 
     // Resolve CWB output dir only when user passed -o/--output or --all
     if (!output_dir.empty()) {
