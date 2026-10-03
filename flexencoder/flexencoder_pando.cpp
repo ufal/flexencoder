@@ -149,10 +149,10 @@ void PandoEventsWriter::begin_corpus(const FlexConfig& cfg) {
         fs::create_directories(fs::path(index_output_dir_));
         // Real CLI: pando-index [options] <input> <output_dir> with '-' = JSONL on stdin
         // when --format jsonl (see `pando-index --help`).
+        // kv_pipe columns and split_feats travel in the JSONL header (as with the
+        // C++ API writer); pando-index has no --kv-pipe option (it would be read as
+        // the input path: "Cannot open --kv-pipe").
         std::string cmd = shell_single_quote(pando_exe_) + " --format jsonl";
-        if (cfg_snapshot_.pando_index_kv_pipe) {
-            cmd += " --kv-pipe";
-        }
         cmd += " - " + shell_single_quote(index_output_dir_);
         pipe_ = popen(cmd.c_str(), "w");
         if (!pipe_) {
