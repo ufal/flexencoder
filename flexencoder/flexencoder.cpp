@@ -405,7 +405,17 @@ int main(int argc, char** argv) {
         std::cerr << "[flexencoder] " << e.what() << std::endl;
         return 1;
     }
-    return 0;
+    // a backend whose output is unusable (e.g. pando-index failed) fails the run, so
+    // callers (flexicorp's staged reindex) never swap a broken index in
+    int failed = 0;
+    for (const auto& w : writers) {
+        const std::string why = w ? w->failure() : std::string();
+        if (!why.empty()) {
+            std::cerr << "[flexencoder] error: " << why << std::endl;
+            ++failed;
+        }
+    }
+    return failed ? 1 : 0;
     } catch (const std::length_error& e) {
         std::cerr << "[flexencoder] length_error: " << e.what() << std::endl;
         return 1;

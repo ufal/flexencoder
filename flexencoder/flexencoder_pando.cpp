@@ -12,6 +12,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifndef _WIN32
+#include <sys/wait.h>   // WIFEXITED etc. for pclose() status
+#endif
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -101,7 +105,13 @@ void PandoEventsWriter::close_output() {
         int st = pclose(pipe_);
         pipe_ = nullptr;
         if (st != 0) {
-            std::cerr << "[flexencoder] pando-index exited with status " << st << "\n";
+            std::string why;
+            if (st == -1) why = "could not be waited for";
+            else if (WIFEXITED(st)) why = "exited with status " + std::to_string(WEXITSTATUS(st));
+            else if (WIFSIGNALED(st)) why = "was killed by signal " + std::to_string(WTERMSIG(st));
+            else why = "failed (status " + std::to_string(st) + ")";
+            failure_ = "pando-index " + why + " (index " + index_output_dir_ + " is incomplete)";
+            std::cerr << "[flexencoder] " << failure_ << "\n";
         }
     }
     if (file_out_.is_open()) file_out_.close();
@@ -156,6 +166,7 @@ void PandoEventsWriter::begin_corpus(const FlexConfig& cfg) {
         cmd += " - " + shell_single_quote(index_output_dir_);
         pipe_ = popen(cmd.c_str(), "w");
         if (!pipe_) {
+            failure_ = "could not run " + pando_exe_ + " (no index built in " + index_output_dir_ + ")";
             std::cerr << "[flexencoder] Warning: could not run pando-index; writing JSONL to " << jsonl_fallback_
                       << "\n";
             open_file_output(fs::path(jsonl_fallback_));
@@ -567,6 +578,12 @@ void PandoEventsWriter::end_corpus() {
         flush_current_document();
     }
     if (out_) out_->flush();
+    const bool was_streaming = streaming_ && pipe_ != nullptr;
     close_output();
+    // pando-index writes corpus.info last: without it the directory is not an index
+    if (was_streaming && failure_.empty() && !fs::exists(fs::path(index_output_dir_) / "corpus.info")) {
+        failure_ = "pando-index finished but " + index_output_dir_ + "/corpus.info is missing";
+        std::cerr << "[flexencoder] " << failure_ << "\n";
+    }
 }
 

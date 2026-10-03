@@ -36,10 +36,15 @@ flexencoder: $(BINDIR)/flexencoder
 $(BINDIR)/flexencoder: $(FLEXENCODER_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_PANDO)
 
+# -MMD -MP: each .o also depends on the headers it includes (a changed header,
+# e.g. a new virtual in flexencoder.hpp, rebuilds every user instead of linking
+# objects with mismatched layouts, which crashes at run time)
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+-include $(FLEXENCODER_OBJS:.o=.d)
 
 clean:
-	rm -f $(FLEXENCODER_OBJS) $(BINDIR)/flexencoder
+	rm -f $(FLEXENCODER_OBJS) $(FLEXENCODER_OBJS:.o=.d) $(BINDIR)/flexencoder
 
 .PHONY: flexencoder clean

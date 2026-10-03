@@ -163,6 +163,8 @@ public:
     virtual void add_region(const FlexRegion& reg) = 0;
     virtual void end_document(const FlexDocumentMeta& doc) = 0;
     virtual void end_corpus() = 0;
+    /** After end_corpus(): non-empty when this backend's output is unusable (flexencoder then exits 1). */
+    virtual std::string failure() const { return {}; }
 };
 
 class FlexExtractor {

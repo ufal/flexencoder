@@ -42,8 +42,10 @@ public:
     void add_region(const FlexRegion& reg) override;
     void end_document(const FlexDocumentMeta& doc) override;
     void end_corpus() override;
+    std::string failure() const override { return failure_; }
 
 private:
+    std::string failure_;   // streaming: pando-index did not run, failed, or left no corpus.info
     std::string output_path_;
     bool streaming_{false};
     std::string pando_exe_;
