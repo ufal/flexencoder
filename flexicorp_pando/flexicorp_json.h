@@ -1060,12 +1060,17 @@ inline std::string to_flexicorp_json(
 
     NameIndexMap name_map = build_name_map(parsed_query);
 
+    // Auto-labels use the token's position among non-anchor match tokens (t1, t2, …).
+    // Do not use a separate counter of only unnamed tokens: after a:[…] the next unnamed
+    // token must be t2, not t1 — otherwise name "t1" collides with id "t1" of the first
+    // group and UIs paint every match token with the last group's colour.
     std::vector<std::string> group_labels;
-    size_t real_idx = 0;
+    size_t group_idx = 0;
     for (size_t t = 0; t < parsed_query.tokens.size(); ++t) {
         if (parsed_query.tokens[t].is_anchor()) continue;
+        ++group_idx;
         const auto& nm = parsed_query.tokens[t].name;
-        group_labels.push_back(nm.empty() ? ("t" + std::to_string(++real_idx)) : nm);
+        group_labels.push_back(nm.empty() ? ("t" + std::to_string(group_idx)) : nm);
     }
 
     std::ostringstream out;
