@@ -481,9 +481,30 @@ void PandoEventsWriter::flush_current_document() {
     for (const auto& reg : doc_regions_) {
         if (is_sentence_like_region(reg, cfg_snapshot_)) { any_sentence = true; break; }
     }
+    // Auto (no cqp/@pando_synthetic_sentence): a document with dependency heads needs
+    // sentence boundaries, or pando-index sees the whole corpus as one sentence.
+    bool want_synthetic = cfg_snapshot_.pando_synthetic_sentence;
+    if (!want_synthetic && !any_sentence && cfg_snapshot_.pando_synthetic_sentence_auto) {
+        for (const auto& tok : doc_tokens_) {
+            bool numeric = false;
+            std::int64_t h = 0;
+            if (!token_head_tok_id(tok, &numeric, &h).empty() || (numeric && h > 0)) {
+                want_synthetic = true;
+                break;
+            }
+        }
+        if (want_synthetic && !warned_synthetic_sentence_) {
+            warned_synthetic_sentence_ = true;
+            std::cerr << "[flexencoder] Pando: no sentence regions (<cqp><sattributes> item with level=\"s\") "
+                         "but tokens have dependency heads: each document becomes one sentence for "
+                         "pando-index. Add the sentence element to the cqp settings (e.g. <item key=\"s\" "
+                         "level=\"s\"/>) for real sentence boundaries; pando_synthetic_sentence=\"0\" turns "
+                         "this off.\n";
+        }
+    }
     FlexRegion synthetic_sent;
     bool have_synthetic_sent = false;
-    if (cfg_snapshot_.pando_synthetic_sentence && !any_sentence && min_tok != 0 && max_tok != 0) {
+    if (want_synthetic && !any_sentence && min_tok != 0 && max_tok != 0) {
         synthetic_sent.doc_id = current_doc_id_;
         synthetic_sent.type = "s";
         synthetic_sent.start_pos = min_tok;

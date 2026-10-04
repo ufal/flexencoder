@@ -45,7 +45,8 @@ public:
     std::string failure() const override { return failure_; }
 
 private:
-    std::string failure_;   // streaming: pando-index did not run, failed, or left no corpus.info
+    std::string failure_;
+    bool warned_synthetic_sentence_{false};   // streaming: pando-index did not run, failed, or left no corpus.info
     std::string output_path_;
     bool streaming_{false};
     std::string pando_exe_;

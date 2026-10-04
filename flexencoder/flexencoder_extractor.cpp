@@ -659,8 +659,10 @@ void FlexExtractor::load_settings() {
         }
 
         cfg_.pando_synthetic_sentence = false;
+        cfg_.pando_synthetic_sentence_auto = true;
         if (cqp.attribute("pando_synthetic_sentence")) {
             cfg_.pando_synthetic_sentence = parse_truthy(cqp.attribute("pando_synthetic_sentence").value());
+            cfg_.pando_synthetic_sentence_auto = false;   // explicit 1 or 0 wins
         }
 
         annotation_types_.clear();

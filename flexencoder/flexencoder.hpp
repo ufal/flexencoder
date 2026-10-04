@@ -83,6 +83,14 @@ struct FlexConfig {
      * Set `cqp/@pando_synthetic_sentence` to 1/true if pando-index needs sentence boundaries.
      */
     bool pando_synthetic_sentence{false};
+    /**
+     * `cqp/@pando_synthetic_sentence` absent: a document *with dependency heads* but no
+     * sentence regions still gets one synthetic `s` (pando-index resolves heads and
+     * stores trees per sentence; without any `s` the whole corpus is one sentence,
+     * token ids collide across documents and no tree can be stored). Set the
+     * attribute to 0 to turn this off as well.
+     */
+    bool pando_synthetic_sentence_auto{true};
 
     /**
      * CQP struct names for XML sentence spans: all <cqp><sattributes> items whose @level is `s` or `seg`.
