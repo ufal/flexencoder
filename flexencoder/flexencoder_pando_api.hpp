@@ -45,6 +45,8 @@ private:
     };
     std::vector<BufferedToken> doc_tokens_;
     std::vector<BufferedRegion> doc_regions_;
+    // positions as the builder assigns them (left-out tokens take none): region bounds
+    IndexPosMap pos_;
     std::string sentence_region_type_{"seg"};
     std::unordered_set<std::string> multivalue_fields_;
     std::unordered_map<std::string, std::string> multivalue_separators_;

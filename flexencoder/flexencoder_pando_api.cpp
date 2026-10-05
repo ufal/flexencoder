@@ -174,9 +174,28 @@ void PandoApiWriter::flush_document() {
         sent_tok_id_to_local[sp.first] = std::move(local);
     }
 
+    // The tokens the builder gets (in a sentence, when the document has sentences, as the
+    // pando-index route has it) and their positions, in which region bounds are given;
+    // xidx numbers them the same way (XidxWriter).
+    std::vector<bool> in_index;
+    {
+        std::vector<std::uint64_t> globals;
+        for (const auto& bt : doc_tokens_) globals.push_back(bt.tok.global_pos);
+        std::vector<FlexRegion> sents;
+        for (const auto& br : doc_regions_)
+            if (br.reg.type == sentence_region_type_ || flexregion_is_sentence_like(br.reg, cfg_snapshot_)) {
+                sents.push_back(br.reg);
+                sents.back().type = "s";
+            }
+        in_index = flex_tokens_in_index(globals, sents, cfg_snapshot_);
+        pos_.begin_document();
+        for (size_t i = 0; i < globals.size(); ++i) pos_.add_token(globals[i], !in_index[i]);
+    }
+
     std::uint64_t current_sent_id = 0;
     for (size_t i = 0; i < doc_tokens_.size(); ++i) {
         const auto& bt = doc_tokens_[i];
+        if (!in_index[i]) continue;
         std::uint64_t global_pos = bt.tok.global_pos;
 
         std::uint64_t sentence_id = 0;
@@ -245,10 +264,12 @@ void PandoApiWriter::flush_document() {
         // index and queries like `freq by s_id` fail with "no region attribute 'id'".
         // FlexRegion start/end use the same 1-based global_pos as tokens; Pando expects
         // 0-based corpus positions (same conversion as PandoEventsWriter / fixed pando-index JSONL).
-        const std::uint64_t start0 = (br.reg.start_pos > 0 ? br.reg.start_pos - 1 : 0);
-        const std::uint64_t end0 = (br.reg.end_pos > 0 ? br.reg.end_pos - 1 : 0);
-        pando::CorpusPos start = static_cast<pando::CorpusPos>(start0);
-        pando::CorpusPos end   = static_cast<pando::CorpusPos>(end0);
+        // in the builder's positions (see above); a region of left-out tokens only (a `del`)
+        // comes out zero-width: start > end
+        const std::uint64_t is = pos_.start_of(br.reg.start_pos);
+        const std::uint64_t ie = pos_.end_of(br.reg.end_pos);
+        pando::CorpusPos start = static_cast<pando::CorpusPos>(is) - 1;
+        pando::CorpusPos end   = static_cast<pando::CorpusPos>(ie) - 1;
         builder_->add_region(br.reg.type, start, end, rattrs);
     }
 #endif

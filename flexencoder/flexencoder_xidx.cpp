@@ -44,7 +44,8 @@ XidxWriter::XidxWriter(const std::string& project_root, const std::string& xidx_
     : project_root_(project_root), xidx_output_dir_(xidx_output_dir) {}
 
 void XidxWriter::begin_corpus(const FlexConfig& cfg) {
-    (void)cfg;
+    cfg_ = cfg;
+    pos_ = IndexPosMap();
     fs::path root(project_root_.empty() ? "." : project_root_);
     if (!root.is_absolute()) {
         root = fs::absolute(root);
@@ -124,12 +125,19 @@ void XidxWriter::begin_document(const FlexDocumentMeta& doc) {
 
     std::string rel = abs_path.lexically_relative(root).string();
     current_doc_idx_ = intern_doc(rel);
+    pos_.begin_document();
+    doc_tokens_.clear();
+    doc_regions_.clear();
 }
 
 void XidxWriter::add_token(const FlexToken& tok) {
     if (!tokens_bin_) return;
+    doc_tokens_.push_back(tok);
+}
+
+void XidxWriter::write_token(const FlexToken& tok, std::uint64_t corpus_pos0) {
     XidxTokenRecord rec;
-    rec.corpus_pos = (tok.global_pos > 0) ? (tok.global_pos - static_cast<std::uint64_t>(1)) : 0;
+    rec.corpus_pos = corpus_pos0;
     rec.doc_idx = current_doc_idx_;
     rec.xml_start = tok.xml_start;
     rec.xml_end = tok.xml_end;
@@ -139,11 +147,18 @@ void XidxWriter::add_token(const FlexToken& tok) {
 
 void XidxWriter::add_region(const FlexRegion& reg) {
     if (!regions_bin_) return;
+    doc_regions_.push_back(reg);
+}
+
+void XidxWriter::write_region(const FlexRegion& reg) {
+    if (!regions_bin_) return;
     const std::uint64_t rec_idx = regions_rec_count_;
     regions_rec_count_++;
-    const std::uint64_t sp0 =
-        (reg.start_pos > 0) ? (reg.start_pos - static_cast<std::uint64_t>(1)) : 0;
-    const std::uint64_t ep0 = (reg.end_pos > 0) ? (reg.end_pos - static_cast<std::uint64_t>(1)) : 0;
+    // bounds in Pando's positions; a region of left-out tokens only keeps its place
+    const std::uint64_t is = pos_.start_of(reg.start_pos);
+    const std::uint64_t ie = std::max(pos_.end_of(reg.end_pos), is);
+    const std::uint64_t sp0 = is > 0 ? is - 1 : 0;
+    const std::uint64_t ep0 = ie > 0 ? ie - 1 : 0;
     XidxRegionRecord rec;
     rec.region_type_idx = intern_region_type(reg.type);
     rec.doc_idx = current_doc_idx_;
@@ -165,6 +180,22 @@ void XidxWriter::add_region(const FlexRegion& reg) {
 
 void XidxWriter::end_document(const FlexDocumentMeta& doc) {
     (void)doc;
+    // the document's tokens in the Pando index, numbered as Pando numbers them
+    std::vector<std::uint64_t> globals;
+    std::vector<const FlexToken*> kept;
+    for (const auto& t : doc_tokens_) {
+        if (flextoken_left_out_of_index(t, cfg_)) continue;
+        globals.push_back(t.global_pos);
+        kept.push_back(&t);
+    }
+    const std::vector<bool> in = flex_tokens_in_index(globals, doc_regions_, cfg_);
+    for (size_t i = 0; i < kept.size(); ++i) {
+        const std::uint64_t ipos = pos_.add_token(kept[i]->global_pos, !in[i]);
+        if (ipos > 0) write_token(*kept[i], ipos - 1);
+    }
+    for (const auto& r : doc_regions_) write_region(r);
+    doc_tokens_.clear();
+    doc_regions_.clear();
 }
 
 void XidxWriter::end_corpus() {

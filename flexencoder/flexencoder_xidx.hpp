@@ -53,6 +53,15 @@ private:
     std::unordered_map<std::string, std::uint32_t> region_id_index_;
 
     std::uint32_t current_doc_idx_{0};
+    // keys in Pando's positions (TEITOK `--` placeholders and tokens outside every sentence
+    // take none; see IndexPosMap): a document's tokens and regions are kept until its end,
+    // when it is known which tokens Pando gets
+    FlexConfig cfg_;
+    IndexPosMap pos_;
+    std::vector<FlexToken> doc_tokens_;
+    std::vector<FlexRegion> doc_regions_;
+    void write_token(const FlexToken& tok, std::uint64_t corpus_pos0);
+    void write_region(const FlexRegion& reg);
 
     static constexpr std::uint32_t INVALID_INDEX = 0xFFFFFFFFu;
 

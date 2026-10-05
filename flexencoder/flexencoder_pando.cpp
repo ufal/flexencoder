@@ -460,7 +460,11 @@ void PandoEventsWriter::write_sentence_block(const FlexRegion& sent_reg) {
 
     std::map<std::string, std::string> attrs = sent_reg.attrs;
     if (!sent_reg.id.empty() && !attrs.count("id")) attrs["id"] = sent_reg.id;
-    write_region_event("s", start0, end0, attrs);
+    // pando-index takes the sentence's span from its tokens; the bounds given are the
+    // index positions (as for every region), so it finds nothing to warn about
+    const std::uint64_t is = pos_.start_of(sent_reg.start_pos);
+    const std::uint64_t ie = pos_.end_of(sent_reg.end_pos);
+    write_region_event("s", is > 0 ? is - 1 : 0, ie > 0 ? ie - 1 : 0, attrs);
 }
 
 void PandoEventsWriter::flush_current_document() {
@@ -512,11 +516,41 @@ void PandoEventsWriter::flush_current_document() {
         have_synthetic_sent = true;
     }
 
+    // The positions pando-index gives this document's tokens: those written below (in a
+    // sentence, when the document has sentences), counted on from the earlier documents.
+    // Region bounds are written in them, not in flexencoder's global positions, which
+    // also count the `--` placeholders (written as `del` regions) and tokens outside
+    // every sentence; xidx uses the same numbering (XidxWriter).
+    {
+        std::vector<std::uint64_t> globals;
+        for (const auto& tok : doc_tokens_)
+            if (tok.tok_id != "w-empty" && tok.global_pos != 0) globals.push_back(tok.global_pos);
+        std::vector<FlexRegion> sents;
+        for (const auto& reg : doc_regions_)
+            if (is_sentence_like_region(reg, cfg_snapshot_)) sents.push_back(reg);
+        if (have_synthetic_sent) sents.push_back(synthetic_sent);
+        // (write_sentence_block matches s / seg / pando_sentence_struct_keys as is_sentence_like_region)
+        std::vector<bool> in(globals.size(), true);
+        if (!sents.empty()) {
+            for (auto& r : sents) r.type = "s";
+            in = flex_tokens_in_index(globals, sents, cfg_snapshot_);
+        }
+        pos_.begin_document();
+        for (size_t i = 0; i < globals.size(); ++i) pos_.add_token(globals[i], !in[i]);
+    }
+    auto index_bounds = [&](const FlexRegion& reg, std::uint64_t& start0, std::uint64_t& end0) {
+        const std::uint64_t is = pos_.start_of(reg.start_pos);
+        const std::uint64_t ie = pos_.end_of(reg.end_pos);
+        start0 = is > 0 ? is - 1 : 0;
+        // ie == is - 1: only left-out tokens (a `del`): zero width before the next token
+        end0 = ie > 0 ? ie - 1 : 0;
+    };
+
     // Emit a single text region first (context anchor), if present.
    for (const auto& reg : doc_regions_) {
         if (reg.type != "text") continue;
-        std::uint64_t start0 = (reg.start_pos > 0 ? reg.start_pos - 1 : 0);
-        std::uint64_t end0 = (reg.end_pos > 0 ? reg.end_pos - 1 : 0);
+        std::uint64_t start0 = 0, end0 = 0;
+        index_bounds(reg, start0, end0);
 
         std::map<std::string, std::string> attrs = reg.attrs;
         if (!reg.id.empty() && !attrs.count("id")) attrs["id"] = reg.id;
@@ -567,8 +601,8 @@ void PandoEventsWriter::flush_current_document() {
               });
 
     for (const auto& reg : other) {
-        std::uint64_t start0 = (reg.start_pos > 0 ? reg.start_pos - 1 : 0);
-        std::uint64_t end0 = (reg.end_pos > 0 ? reg.end_pos - 1 : 0);
+        std::uint64_t start0 = 0, end0 = 0;
+        index_bounds(reg, start0, end0);
 
         if (zerowidth_types_.count(reg.type)) {
             if (start0 == end0 && start0 > 0) end0 = start0 - 1;

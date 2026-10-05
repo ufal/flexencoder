@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -147,6 +148,14 @@ inline bool flextoken_word_is_dash(const FlexToken& tok, const std::string& word
     return w == "--";
 }
 
+/** Whether a token is left out of the Pando index (and so of xidx, whose positions must be
+ *  Pando's): TEITOK's empty-text placeholder, and `--` placeholder tokens when
+ *  cfg.pando_del_tokens (Pando gets those as zero-width `del` regions instead). */
+inline bool flextoken_left_out_of_index(const FlexToken& tok, const FlexConfig& cfg) {
+    if (tok.tok_id == "w-empty") return true;
+    return cfg.pando_del_tokens && flextoken_word_is_dash(tok, cfg.wordfld);
+}
+
 struct FlexRegion {
     std::string doc_id;
     std::string id;        // @id if present
@@ -160,6 +169,79 @@ struct FlexRegion {
     /** Correctly punctuated sentence text (for sentence-level regions). Filled by extractor when nospace/join apply. */
     std::string fulltext;
 };
+
+/**
+ * Positions in the Pando index (1-based here, like global_pos): the tokens left out
+ * (flextoken_left_out_of_index) take no position, so every later token moves up. Pando
+ * numbers its tokens that way; region bounds and xidx keys must follow, or everything
+ * after the first `--` token of the corpus is off (text regions spill into the next
+ * document, XML fragments come from the wrong sentence).
+ *
+ * Feed a document's tokens in order (add_token), then map its regions (start_of / end_of).
+ * Tokens arrive with ascending global_pos and a region only spans tokens of its own
+ * document. Tokens outside every sentence of a document that has sentences are left out
+ * too (flex_tokens_in_index): pando-index never gets them.
+ */
+class IndexPosMap {
+public:
+    void begin_document() {
+        globals_.clear();
+        base_ = next_;
+    }
+    /** The token's 1-based index position, 0 when it is left out. */
+    std::uint64_t add_token(std::uint64_t global_pos, bool left_out) {
+        if (left_out) return 0;
+        globals_.push_back(global_pos);
+        return ++next_;
+    }
+    /** Index position of the first indexed token at or after global position `g`. */
+    std::uint64_t start_of(std::uint64_t g) const {
+        return base_ + static_cast<std::uint64_t>(
+            std::lower_bound(globals_.begin(), globals_.end(), g) - globals_.begin()) + 1;
+    }
+    /** Index position of the last indexed token at or before `g` (start_of(g) - 1 when
+     *  `g` itself is left out: a region of left-out tokens only comes out zero-width). */
+    std::uint64_t end_of(std::uint64_t g) const {
+        return base_ + static_cast<std::uint64_t>(
+            std::upper_bound(globals_.begin(), globals_.end(), g) - globals_.begin());
+    }
+    std::uint64_t indexed() const { return next_; }
+
+private:
+    std::vector<std::uint64_t> globals_;
+    std::uint64_t base_{0};
+    std::uint64_t next_{0};
+};
+/** A sentence span for Pando: `s` / `seg`, or a key listed in cfg.pando_sentence_struct_keys. */
+inline bool flexregion_is_sentence_like(const FlexRegion& reg, const FlexConfig& cfg) {
+    if (reg.type == "s" || reg.type == "seg") return true;
+    for (const auto& k : cfg.pando_sentence_struct_keys)
+        if (reg.type == k) return true;
+    return false;
+}
+
+/** Which of a document's tokens (ascending `globals`, none of them left out) the Pando index
+ *  gets: with sentence regions, those inside one (pando-index takes its sentences from them
+ *  and the token stream is written sentence by sentence); without, all of them. */
+inline std::vector<bool> flex_tokens_in_index(const std::vector<std::uint64_t>& globals,
+                                              const std::vector<FlexRegion>& regions,
+                                              const FlexConfig& cfg) {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> spans;
+    for (const auto& r : regions)
+        if (flexregion_is_sentence_like(r, cfg)) spans.emplace_back(r.start_pos, r.end_pos);
+    std::vector<bool> in(globals.size(), spans.empty());
+    if (spans.empty()) return in;
+    std::sort(spans.begin(), spans.end());
+    // spans sorted by start; a token is in when some span with start <= g reaches g
+    std::uint64_t reach = 0;
+    size_t k = 0;
+    for (size_t i = 0; i < globals.size(); ++i) {
+        const std::uint64_t g = globals[i];
+        while (k < spans.size() && spans[k].first <= g) reach = std::max(reach, spans[k++].second);
+        in[i] = k > 0 && reach >= g;
+    }
+    return in;
+}
 
 class IFlexBackendWriter {
 public:

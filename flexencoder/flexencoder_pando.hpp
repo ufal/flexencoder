@@ -68,6 +68,8 @@ private:
 
     std::vector<FlexToken> doc_tokens_;
     std::vector<FlexRegion> doc_regions_;
+    // positions as pando-index assigns them (left-out tokens take none): region bounds
+    IndexPosMap pos_;
     std::string current_doc_id_;
     bool has_active_doc_{false};
     bool doc_closed_{false};
