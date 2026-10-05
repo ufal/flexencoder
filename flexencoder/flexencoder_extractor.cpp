@@ -923,6 +923,24 @@ std::string FlexExtractor::calc_form(const pugi::xml_node& node, const std::stri
     return "";
 }
 
+bool FlexExtractor::form_is_deleted(const pugi::xml_node& node, const std::string& fld) const {
+    // the same walk as calc_form: the first non-empty attribute decides; reaching the text
+    // (pform) means no attribute set the form, and a `--` there is a real dash
+    std::string getfld = fld;
+    std::unordered_set<std::string> seen;
+    for (int depth = 0; depth < 64; ++depth) {
+        if (!seen.insert(getfld).second) break;
+        if (getfld == "pform") return false;
+        pugi::xml_attribute a = node.attribute(getfld.c_str());
+        const std::string t = a ? trim(replace_all(std::string(a.value()), "\n", " ")) : std::string();
+        if (!t.empty()) return t == "--";
+        auto it = inherit_.find(getfld);
+        if (it == inherit_.end() || it->second.empty()) break;
+        getfld = it->second;
+    }
+    return false;
+}
+
 static std::string sattr_xml_fragment_value(const pugi::xpath_node& xresi, const std::string& xml_mode) {
     if (xresi.attribute()) return std::string(xresi.attribute().value());
     if (!xresi.node()) return "";
@@ -1315,6 +1333,7 @@ void FlexExtractor::treat_file(
         tok.doc_pos = ++doc_pos;
         tok.xml_start = xml_start;
         tok.xml_end = xml_end;
+        tok.deleted = form_is_deleted(node, wordfld_);
         // Values: direct attribute on <tok> (etc.) or xpath relative to the token node — from cqpsettings only.
         for (const auto& pa : pattrs_) {
             std::string formval;

@@ -271,7 +271,7 @@ void PandoEventsWriter::add_region(const FlexRegion& reg) {
 
 void PandoEventsWriter::add_token(const FlexToken& tok) {
     if (tok.tok_id == "w-empty") return;
-    if (cfg_snapshot_.pando_del_tokens && flextoken_word_is_dash(tok, cfg_snapshot_.wordfld)) {
+    if (cfg_snapshot_.pando_del_tokens && tok.deleted) {
         FlexRegion delreg;
         delreg.doc_id = tok.doc_id;
         delreg.type = "del";

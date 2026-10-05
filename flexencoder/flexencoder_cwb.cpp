@@ -266,14 +266,8 @@ void CwbWriter::begin_document(const FlexDocumentMeta& doc) {
 
 void CwbWriter::add_token(const FlexToken& tok) {
     if (!initialized_) return;
-    std::string word_form;
-    auto it_word = tok.attrs.find("word");
-    if (it_word != tok.attrs.end()) word_form = it_word->second;
-    if (word_form.empty()) {
-        auto it_f = tok.attrs.find(wordfld_);
-        if (it_f != tok.attrs.end()) word_form = it_f->second;
-    }
-    if (word_form == "--" && tok.tok_id != "w-empty") {
+    // TEITOK's deleted token (@form="--"); a `--` in the text is a real dash
+    if (tok.deleted && tok.tok_id != "w-empty") {
         doc_skipped_positions_.insert(tok.global_pos);
         return;
     }

@@ -115,7 +115,7 @@ void PandoApiWriter::begin_document(const FlexDocumentMeta& doc) {
 void PandoApiWriter::add_token(const FlexToken& tok) {
 #ifdef USE_PANDO_API
     if (tok.tok_id == "w-empty") return;
-    if (cfg_snapshot_.pando_del_tokens && flextoken_word_is_dash(tok, cfg_snapshot_.wordfld)) {
+    if (cfg_snapshot_.pando_del_tokens && tok.deleted) {
         BufferedRegion br;
         br.reg.doc_id = tok.doc_id;
         br.reg.type = "del";

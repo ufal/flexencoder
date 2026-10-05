@@ -277,14 +277,9 @@ void ClickHouseWriter::end_document(const FlexDocumentMeta& doc) {
     std::uint64_t doc_tok_pos = 0;
     for (size_t i = 0; i < doc_tokens_.size(); ++i) {
         const auto& bt = doc_tokens_[i];
-        std::string word_val = bt.tok.attrs.count("word") ? bt.tok.attrs.at("word") : "";
-        if (word_val.empty()) {
-            auto it_f = bt.tok.attrs.find(wordfld_);
-            if (it_f != bt.tok.attrs.end()) word_val = it_f->second;
-        }
         // Keep ClickHouse tok_pos/doc_pos aligned with CWB cpos semantics:
-        // skip TEITOK placeholder tokens ("--") from positional streams.
-        if (word_val == "--" && bt.tok.tok_id != "w-empty") continue;
+        // skip TEITOK's deleted tokens (@form="--") from positional streams.
+        if (bt.tok.deleted && bt.tok.tok_id != "w-empty") continue;
         tok_pos_++;
         doc_tok_pos++;
         emitted_tok_positions[i] = tok_pos_;

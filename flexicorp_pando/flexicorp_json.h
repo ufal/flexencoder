@@ -492,6 +492,27 @@ inline int find_scope_type_idx(const std::vector<std::string>& region_types, con
     return -1;
 }
 
+/// Stand-off regions (TEITOK `<s id="s-3" sameAs="#w-55 … #w-80"/>`, an empty element
+/// next to the tokens it lists): the element's own XML holds no token. Widen
+/// [xml_start, xml_end) to the XML of the region's tokens [tok_lo, tok_hi]: kept from the
+/// element on when it comes right before them (so the fragment still shows the region's
+/// tag and id), else the tokens alone. Returns true when the region was stand-off and the
+/// element is not part of the result (callers then cannot look for its id or end tag).
+inline bool xidx_widen_standoff_region(const XidxIndex& xi, uint32_t doc, int64_t tok_lo, int64_t tok_hi,
+                                       int64_t& xml_start, int64_t& xml_end) {
+    int64_t ts = -1, te = -1;
+    if (!xi.xml_bounds(doc, tok_lo, tok_hi, ts, te)) return false;
+    if (xml_start >= 0 && ts >= xml_start && te <= xml_end) return false;   // inline: holds its tokens
+    const bool element_before = xml_start >= 0 && xml_end <= ts && ts - xml_end <= 4096;
+    if (element_before) {
+        xml_end = te;
+        return false;
+    }
+    xml_start = ts;
+    xml_end = te;
+    return true;
+}
+
 inline bool xidx_lookup_fragment(
     const std::string& index_dir,
     const std::string& xidx_project_root_override,
@@ -589,8 +610,12 @@ inline bool xidx_lookup_fragment(
                     const uint32_t doc_start = e_start.doc_idx;
                     const uint32_t doc_end = e_end.doc_idx;
                     if (doc_start < docs.size() && doc_start == doc_end) {
-                        const int64_t frag_xml_start = e_start.xml_start;
-                        const int64_t frag_xml_end = e_end.xml_end;
+                        int64_t frag_xml_start = e_start.xml_start;
+                        int64_t frag_xml_end = e_end.xml_end;
+                        // stand-off regions: the XML of their tokens (and of the match)
+                        const bool standoff_alone = xidx_widen_standoff_region(
+                            *xi, doc_start, std::min({e_start.start, e_end.start, adj_start}),
+                            std::max({e_start.end, e_end.end, adj_end}), frag_xml_start, frag_xml_end);
                         const std::string rel = docs[doc_start];
                         const std::string xml_path = project_root + "/" + rel;
 
@@ -604,7 +629,7 @@ inline bool xidx_lookup_fragment(
                                 std::string frag(static_cast<size_t>(frag_xml_end - frag_xml_start), '\0');
                                 xml.read(&frag[0], static_cast<std::streamsize>(frag.size()));
                                 if (!frag.empty()) {
-                                    if (context_scope == "s" || context_scope == "seg") {
+                                    if ((context_scope == "s" || context_scope == "seg") && !standoff_alone) {
                                         const uint32_t ridx = e_start.region_id_idx;
                                         if (ridx < xi->region_id_count()) {
                                             const std::string expected_id = xi->region_id(ridx);
@@ -679,6 +704,15 @@ inline bool xidx_lookup_fragment(
                 }
                 frag_xml_start = std::min(region_xml_start, tr.xml_start);
                 frag_xml_end = std::max(region_xml_end, tr.xml_end);
+                // stand-off region: its tokens' XML (the element alone holds none)
+                int64_t ws = region_xml_start, we = region_xml_end;
+                const bool standoff_alone = xidx_widen_standoff_region(
+                    *xi, tr.doc_idx, std::min(rstart, effective_pos), std::max(rend, effective_pos), ws, we);
+                if (ws != region_xml_start || we != region_xml_end) {
+                    frag_xml_start = std::min(ws, tr.xml_start);
+                    frag_xml_end = std::max(we, tr.xml_end);
+                    if (standoff_alone) expected_sentence_region_id.clear();
+                }
             } else {
                 int64_t xs = frag_xml_start;
                 int64_t xe = frag_xml_end;

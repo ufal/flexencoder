@@ -135,25 +135,18 @@ struct FlexToken {
     std::map<std::string, std::string> attrs; // form/lemma/pos/upos/...
     std::uint64_t xml_start{0};  // byte offset in XML file for xidx
     std::uint64_t xml_end{0};
+    /** TEITOK's deleted token: its word field is `--` from an attribute (@form="--", or the
+     *  @wordfld / an attribute it inherits from), not from the text. A `--` written as the
+     *  token's text is a real dash. Set by FlexExtractor (form_is_deleted). */
+    bool deleted{false};
 };
 
-/** True when the token's surface/word field is TEITOK's `--` placeholder (deleted/no token). */
-inline bool flextoken_word_is_dash(const FlexToken& tok, const std::string& wordfld) {
-    auto it = tok.attrs.find("word");
-    std::string w = (it != tok.attrs.end()) ? it->second : "";
-    if (w.empty() && !wordfld.empty()) {
-        it = tok.attrs.find(wordfld);
-        if (it != tok.attrs.end()) w = it->second;
-    }
-    return w == "--";
-}
-
 /** Whether a token is left out of the Pando index (and so of xidx, whose positions must be
- *  Pando's): TEITOK's empty-text placeholder, and `--` placeholder tokens when
+ *  Pando's): TEITOK's empty-text placeholder, and deleted tokens (@form="--") when
  *  cfg.pando_del_tokens (Pando gets those as zero-width `del` regions instead). */
 inline bool flextoken_left_out_of_index(const FlexToken& tok, const FlexConfig& cfg) {
     if (tok.tok_id == "w-empty") return true;
-    return cfg.pando_del_tokens && flextoken_word_is_dash(tok, cfg.wordfld);
+    return cfg.pando_del_tokens && tok.deleted;
 }
 
 struct FlexRegion {
@@ -362,6 +355,9 @@ private:
                     void* dry_run_state = nullptr);
 
     std::string calc_form(const pugi::xml_node& node, const std::string& fld) const;
+    /** Whether `fld` (through its inherit chain) is `--` from an attribute: TEITOK's deleted
+     *  token. The text (pform) can hold a real `--`. */
+    bool form_is_deleted(const pugi::xml_node& node, const std::string& fld) const;
 
     /** Resolve one structural attribute value (tt-cwb-encode semantics: xpath, external, type=form, values=multi, xml=). */
     std::string eval_sattr_item(
