@@ -98,7 +98,7 @@ static std::vector<std::string> parse_attrs(const char* attrs) {
 extern "C" {
 
 int flexicorp_pando_api_version(void) {
-    return 4;
+    return 5;
 }
 
 static flexicorp_pando_ctx_t* open_ctx(const char* project_root, const char* index_dir,
@@ -395,6 +395,61 @@ char* flexicorp_pando_request(
     } catch (...) {
         ctx->set_error("unknown error");
         return to_c_str(std::string("{\"ok\":false,\"error\":\"unknown error\"}\n"));
+    }
+}
+
+char* flexicorp_pando_xidx_fragments(
+    flexicorp_pando_ctx_t* ctx,
+    const char* project_root_arg,
+    const long long* spans,
+    size_t n,
+    const char* context_scope,
+    int context
+) {
+    if (!ctx) {
+        g_last_error = "null context handle";
+        return nullptr;
+    }
+    try {
+        std::string fragment_env;
+        if (const char* fe = std::getenv("FLEXICORP_FRAGMENT_CONTEXT_SCOPE")) fragment_env = fe;
+        const std::string project_root = (project_root_arg && *project_root_arg) ? std::string(project_root_arg)
+            : !ctx->xidx_project_root.empty() ? ctx->xidx_project_root
+            : flexicorp_pando::derive_project_root(ctx->index_dir);
+        const flexicorp_pando::PandoFragmentEmitPolicy pol = flexicorp_pando::resolve_pando_fragment_emit_policy(
+            context_scope ? std::string(context_scope) : std::string(), project_root, fragment_env, true);
+        const int64_t csize = static_cast<int64_t>(ctx->corpus.size());
+        const int kw = std::max(0, context);
+        std::string out = "{\"ok\": true, \"fragments\": [";
+        for (size_t i = 0; i < n; ++i) {
+            if (i) out += ", ";
+            const int64_t start = spans ? static_cast<int64_t>(spans[2 * i]) : -1;
+            const int64_t end = spans ? static_cast<int64_t>(spans[2 * i + 1]) : -1;
+            std::string doc_id, frag;
+            int64_t lo = -1, hi = -1;
+            if (pol.use_kwic_token_xml_span) {
+                lo = std::max<int64_t>(0, start - kw);
+                hi = csize > 0 ? std::min<int64_t>(csize - 1, end + kw) : end;
+            }
+            if (start < 0 || end < start || !pol.include_xidx_fragment
+                || !flexicorp_pando::xidx_lookup_fragment(ctx->index_dir, project_root, start, end,
+                                                          pol.context_scope, doc_id, frag, lo, hi)
+                || frag.empty()) {
+                out += "null";
+                continue;
+            }
+            frag = flexicorp_pando::sanitize_xml_fragment_edges(frag);
+            out += "{\"doc_id\": " + (doc_id.empty() ? std::string("null") : pando::jstr(doc_id))
+                 + ", \"fragment\": " + pando::jstr(frag) + "}";
+        }
+        out += "], \"context_scope\": " + pando::jstr(pol.context_scope) + "}\n";
+        return to_c_str(out);
+    } catch (const std::exception& e) {
+        ctx->set_error(e.what());
+        return nullptr;
+    } catch (...) {
+        ctx->set_error("unknown error");
+        return nullptr;
     }
 }
 

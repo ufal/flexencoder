@@ -30,7 +30,8 @@ typedef struct flexicorp_pando_ctx flexicorp_pando_ctx_t;
 
 // Return the API version (2: flexicorp_pando_request + build_string;
 // 3: build_json, busy, idle_seconds; request runs pando::ServerApi;
-// 4: flexicorp_pando_open_opts — server options: limits by tier, sessions, …).
+// 4: flexicorp_pando_open_opts — server options: limits by tier, sessions, …;
+// 5: flexicorp_pando_xidx_fragments — TEITOK XML around hits from the project's xidx).
 // Callers can check this to detect breaking changes.
 int flexicorp_pando_api_version(void);
 
@@ -132,6 +133,26 @@ const char* flexicorp_pando_build_string(void);
 // {"version", "build", "commit", "branch", "build_string", "adapter_api_version",
 //  "features": [...]} of the linked pando. Static; do not free.  (api_version 3)
 const char* flexicorp_pando_build_json(void);
+
+// TEITOK XML around corpus spans, from the project's xidx (written by flexencoder next to
+// pando/): what flexicorp_pando_query puts in a hit's "fragment", for answers that come
+// from flexicorp_pando_request (pando-server JSON has corpus positions only).
+//   project_root   the TEITOK project (holds xidx/ and xmlfiles/); NULL/"" = the one the
+//                  handle was opened with, else the folder holding the index's pando/
+//   spans          n pairs [start, end] of corpus positions (2*n values)
+//   context_scope  region around the span ("s", "u", "p", …; NULL/"" = "s"; "tok" = the
+//                  span itself); FLEXICORP_FRAGMENT_CONTEXT_SCOPE overrides, as for queries
+//   context        KWIC width in tokens, for corpora without sentence / utterance regions
+// Returns {"ok": true, "fragments": [{"doc_id": …, "fragment": …} | null, …]} (one entry
+// per span; null when xidx has none), freed with flexicorp_pando_free.  (api_version 5)
+char* flexicorp_pando_xidx_fragments(
+    flexicorp_pando_ctx_t* ctx,
+    const char* project_root,
+    const long long* spans,
+    size_t n,
+    const char* context_scope,
+    int context
+);
 
 // Requests in flight + background counts queued or running on this handle.
 // Close a handle only when this is 0 and no caller holds it.  (api_version 3)
