@@ -34,6 +34,7 @@ FLEXENCODER_OBJS = $(FLEXENCODER_SRCS:.cpp=.o)
 flexencoder: $(BINDIR)/flexencoder
 
 $(BINDIR)/flexencoder: $(FLEXENCODER_OBJS)
+	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_PANDO)
 
 # -MMD -MP: each .o also depends on the headers it includes (a changed header,

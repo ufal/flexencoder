@@ -13,6 +13,7 @@ FLEXDECODER_OBJS = $(FLEXDECODER_SRCS:.cpp=.o)
 flexdecoder: $(BINDIR)/flexdecoder
 
 $(BINDIR)/flexdecoder: $(FLEXDECODER_OBJS)
+	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 %.o: %.cpp

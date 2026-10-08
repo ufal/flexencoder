@@ -1,0 +1,11 @@
+# Build output (never commit objects or binaries)
+*.o
+*.d
+Scripts/
+build/
+flexicorp_pando/build/
+
+# Local-by-design folders (see the ecosystem conventions)
+dev/
+tests/
+tmp/
