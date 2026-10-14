@@ -122,7 +122,8 @@ static flexicorp_pando_ctx_t* open_ctx(const char* project_root, const char* ind
     }
 
     try {
-        ctx->corpus.open(dir, cfg.preload);
+        // user overlays kept with the index (<dir>/overlays/<layer>/), unless "overlays": "none"
+        ctx->corpus.open(dir, cfg.preload, pando::server_overlay_dirs(dir, cfg, &cfg.overlays_skipped));
         if (cfg.extra_server_fields.empty())
             cfg.extra_server_fields = "\"embedded_in\": \"flexicorp_pando\"";
         ctx->server = std::make_unique<pando::ServerApi>(ctx->corpus, std::move(cfg));
