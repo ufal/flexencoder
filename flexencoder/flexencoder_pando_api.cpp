@@ -101,6 +101,8 @@ void PandoApiWriter::begin_corpus(const FlexConfig& cfg) {
 
     builder_ = std::make_unique<pando::PandoIndexBuilder>(output_dir_);
     builder_->set_default_within("text");
+    // the settings' multivalue attributes (values written '|'-joined below, whatever multisep they use)
+    for (const auto& f : multivalue_fields_) builder_->declare_multivalue(f);
 #endif
 }
 

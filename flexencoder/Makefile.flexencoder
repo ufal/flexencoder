@@ -24,7 +24,11 @@ ifdef PANDO_SRC
 PANDO_BUILD ?= $(PANDO_SRC)/build
 CXXFLAGS += -DUSE_PANDO_API -I$(PANDO_SRC)/src
 FLEXENCODER_SRCS += flexencoder_pando_api.cpp
-LDFLAGS_PANDO = -L$(PANDO_BUILD) -lpando_core
+# pando_core uses its query-dialect libraries and, when Pando was built with RE2, RE2 (pkg-config re2)
+PANDO_DIALECT_LIBS = $(foreach l,pando_cwb_dialect pando_pmltq_dialect pando_manatee_dialect,\
+                       $(if $(wildcard $(PANDO_BUILD)/lib$(l).a),-l$(l)))
+PANDO_RE2_LIBS ?= $(shell grep -q 'PANDO_WITH_RE2:INTERNAL=ON\|re2_DIR:PATH=/' $(PANDO_BUILD)/CMakeCache.txt 2>/dev/null && pkg-config --libs re2 2>/dev/null)
+LDFLAGS_PANDO = -L$(PANDO_BUILD) -lpando_core $(PANDO_DIALECT_LIBS) $(PANDO_RE2_LIBS)
 else
 LDFLAGS_PANDO =
 endif
