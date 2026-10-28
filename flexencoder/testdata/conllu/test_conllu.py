@@ -11,7 +11,9 @@ a complex unit, which has no edge). Each document reuses no entity id here, but 
 Requires, on the JSONL route (pando-index) and, when flexencoder links Pando, on the API route alike:
   * the declarations found in the input: coref (equivalence) and rst (pointer) layers, structures, `Gloss`;
   * `a:[] =:coref b:[]`, `a:[] >:rst b:[]` as annotated; mention / edu / contr / par / text regions;
-  * a plain treebank (MISC without conventions) declares no layer, no mention / edu.
+  * a plain treebank (MISC without conventions) declares no layer, no mention / edu;
+  * on that plain treebank, with build_ud_corpus.py's file header (`# newregion text`, `# text_langcode = …`):
+    the same structures, attributes and counts as pando-index reading the CoNLL-U itself.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
 
@@ -83,37 +85,51 @@ def main():
         inf = info(d)
         check(inf.get("relation.coref", "").startswith("equivalence,attr=coref") and
               inf.get("relation.rst", "").startswith("pointer,label=rel"), f"{route}: layers declared")
-        check(set(inf.get("structural", "").strip().split(",")) == {"contr", "edu", "mention", "par", "s", "text"},
+        check(set(inf.get("structural", "").strip().split(",")) == {"contr", "doc", "edu", "mention", "par", "s"},
               f"{route}: structures {inf.get('structural', '').strip()}")
         check("Gloss" in inf.get("positional", ""), f"{route}: MISC key Gloss indexed")
         got = pairs(d, "a:[] =:coref b:[]")
         check(got == COREF, f"{route}: =:coref {sorted(got)}")
         got = pairs(d, "a:[] >:rst b:[]")
         check(got == RST, f"{route}: >:rst {sorted(got)}")
-        for q, want in (("<mention>[]", 7), ("<edu>[]", 5), ("<contr>[]", 1), ("<par>[]", 3), ("<text>[]", 2),
+        for q, want in (("<mention>[]", 7), ("<edu>[]", 5), ("<contr>[]", 1), ("<par>[]", 3), ("<doc>[]", 2),
                         ('[Gloss="remain"]', 1)):
             n = count(d, q)
             check(n == want, f"{route}: {q} = {n} (reference {want})")
         got = groups(d, '[]; count by match.mention_eid')
         check(got == {"e1": 2, "e2": 3, "e3": 4}, f"{route}: tokens per mention entity {got}")
-        got = groups(d, '[upos="PRON"]; count by match.text_id')
+        got = groups(d, '[upos="PRON"]; count by match.doc_id')
         check(got == {"d1": 3, "d2": 1}, f"{route}: pronouns per document {got}")
 
-    # a plain treebank: no convention in MISC, nothing declared for one
+    # a plain treebank: no convention in MISC, nothing declared for one; the file header of build_ud_corpus.py
     plain = os.path.join(tmp, "plain.conllu")
     with open(SAMPLE, encoding="utf-8") as f, open(plain, "w", encoding="utf-8") as o:
+        o.write("# newregion text\n# text_id = plain.conllu\n# text_langcode = en\n# text_treebank = sample\n")
         for line in f:
             c = line.rstrip("\n").split("\t")
             if len(c) == 10:
                 c[9] = "|".join(x for x in c[9].split("|") if x.split("=")[0] not in ("Entity", "Discourse")) or "_"
                 line = "\t".join(c) + "\n"
             o.write(line)
-    for d in encode(plain, "plain", False):
+    native = os.path.join(tmp, "plain-native")
+    p = subprocess.run([a.pando_index, plain, native], capture_output=True, text=True)
+    if p.returncode != 0:
+        print(p.stderr)
+        return 2
+    ref = info(native)
+    for d in encode(plain, "plain", api):
+        route = "API" if d.endswith("-api") else "JSONL"
         inf = info(d)
-        check(not any(k.startswith("relation.") and k not in ("relation.head",) for k in inf),
-              "plain: no relation layer besides the tree")
-        check(set(inf.get("structural", "").strip().split(",")) == {"contr", "par", "s", "text"},
-              f"plain: structures {inf.get('structural', '').strip()}")
+        check(not any(k.startswith("relation.") and k not in ("relation.head", "relation.deps") for k in inf),
+              f"plain {route}: no relation layer besides the trees")
+        for key in ("structural", "positional", "region_attrs", "relation.head", "relation.deps", "head_attrs"):
+            got, want = set(inf.get(key, "").strip().split(",")), set(ref.get(key, "").strip().split(","))
+            check(got == want, f"plain {route}: {key} as pando-index's own CoNLL-U reader"
+                               + ("" if got == want else f": {sorted(got ^ want)}"))
+        for q in ("[]", "<s>[]", "<doc>[]", "<par>[]", "<contr>[]", "<text>[]", '[upos="PRON"] [upos="VERB"]',
+                  "a:[] > b:[]", '[text_langcode="en"]', '[doc_id="d2"]', '[s_sent_id="d1-s2"]'):
+            n, want = count(d, q), count(native, q)
+            check(n == want, f"plain {route}: {q} = {n} (pando-index {want})")
     print("CoNLL-U input: " + ("as required" if not failures else f"{failures} problem(s)"))
     return 1 if failures else 0
 

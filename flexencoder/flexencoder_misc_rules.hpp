@@ -32,8 +32,9 @@ public:
     /** The MISC keys it reads (`Entity`, `Discourse`). */
     virtual bool claims(std::string_view misc_key) const = 0;
     /** What it adds, declared before the corpus starts (only when the convention occurs in the input): token
-     *  attributes, structures, multivalue attributes, relation layers (cfg.pando_relations). */
-    virtual void declare(FlexConfig& cfg) const = 0;
+     *  attributes, structures, multivalue attributes, relation layers (cfg.pando_relations). `scope`: the region its
+     *  links stay within (`doc` for `# newdoc` documents, `text` for files, else `corpus`). */
+    virtual void declare(FlexConfig& cfg, const std::string& scope) const = 0;
 
     /** A `# key = value` comment line (corpus- or document-level settings such as `global.Entity`). */
     virtual void on_comment(std::string_view key, std::string_view value) { (void)key; (void)value; }

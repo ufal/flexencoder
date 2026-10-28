@@ -135,7 +135,7 @@ struct FlexToken {
     std::uint64_t global_pos{0};
     std::uint32_t doc_pos{0};
     std::uint32_t sent_pos{0};
-    std::map<std::string, std::string> attrs; // form/lemma/pos/upos/...
+    std::map<std::string, std::string> attrs; // form/lemma/pos/upos/...; `deps`: CoNLL-U DEPS (enhanced dependencies)
     std::uint64_t xml_start{0};  // byte offset in XML file for xidx
     std::uint64_t xml_end{0};
     /** TEITOK's deleted token: its word field is `--` from an attribute (@form="--", or the

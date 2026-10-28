@@ -228,6 +228,10 @@ void PandoApiWriter::flush_document() {
 
         std::unordered_map<std::string, std::string> attrs = build_pando_token_attrs(bt.tok);
         // the head field gives the tree (below); an attribute only when declared one (as on the JSONL route)
+        if (auto it = attrs.find("deps"); it != attrs.end()) {   // enhanced dependencies: the relation layer `deps`
+            builder_->set_token_deps(it->second);
+            attrs.erase(it);
+        }
         for (const char* k : {"head", "head_id", "gov"})
             if (std::find(cfg_snapshot_.pando_jsonl2_positional.begin(), cfg_snapshot_.pando_jsonl2_positional.end(),
                           k) == cfg_snapshot_.pando_jsonl2_positional.end())

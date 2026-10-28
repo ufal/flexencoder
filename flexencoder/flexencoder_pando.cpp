@@ -402,6 +402,12 @@ void PandoEventsWriter::write_token_event(const FlexToken& tok) {
         write_json_string(head_tok_id);
     }
 
+    // Enhanced dependencies (CoNLL-U DEPS, heads numbered as `head` is): pando's relation layer `deps`
+    if (auto it = tok.attrs.find("deps"); it != tok.attrs.end()) {
+        O() << ",\"deps\":";
+        write_json_string(it->second);
+    }
+
     // Emit all positional token fields (including "_" placeholders).
     for (const auto& key : positional_) {
         std::string val = "_";

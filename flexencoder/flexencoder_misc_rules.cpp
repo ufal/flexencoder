@@ -45,13 +45,13 @@ public:
     std::string name() const override { return "CorefUD Entity"; }
     bool claims(std::string_view key) const override { return key == "Entity"; }
 
-    void declare(FlexConfig& cfg) const override {
+    void declare(FlexConfig& cfg, const std::string& scope) const override {
         add_unique(cfg.pando_jsonl2_positional, "coref");
         add_unique(cfg.pando_jsonl2_multivalue, "coref");
         cfg.pando_multivalue_separators["coref"] = "|";
         add_unique(cfg.pando_jsonl2_structural, "mention");
         add_unique(cfg.pando_jsonl2_overlapping, "mention");
-        cfg.pando_relations["coref"] = "equivalence,attr=coref,scope=text";
+        cfg.pando_relations["coref"] = "equivalence,attr=coref,scope=" + scope;
     }
 
     void on_comment(std::string_view key, std::string_view value) override {
@@ -176,9 +176,9 @@ public:
     std::string name() const override { return "GUM Discourse"; }
     bool claims(std::string_view key) const override { return key == "Discourse"; }
 
-    void declare(FlexConfig& cfg) const override {
+    void declare(FlexConfig& cfg, const std::string& scope) const override {
         add_unique(cfg.pando_jsonl2_structural, "edu");
-        cfg.pando_relations["rst"] = "pointer,label=rel,scope=text";
+        cfg.pando_relations["rst"] = "pointer,label=rel,scope=" + scope;
     }
 
     void begin_document(const std::string& doc_id) override {

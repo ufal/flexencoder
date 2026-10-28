@@ -18,7 +18,7 @@ BINDIR = ../Scripts
 FLEXENCODER_SRCS = flexencoder.cpp flexencoder_extractor.cpp flexencoder_cwb.cpp \
                    flexencoder_clickhouse.cpp flexencoder_pando.cpp flexencoder_xidx.cpp flexencoder_vrt.cpp \
                    flexencoder_makeall.cpp flexencoder_helpers.cpp pugixml.cpp functions-c11.cpp \
-                   flexencoder_conllu.cpp flexencoder_misc_rules.cpp
+                   flexencoder_conllu.cpp flexencoder_conllu_comments.cpp flexencoder_misc_rules.cpp
 
 # Optional: Pando index API (pando::PandoIndexBuilder)
 ifdef PANDO_SRC

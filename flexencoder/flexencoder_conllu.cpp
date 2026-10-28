@@ -1,6 +1,7 @@
 // flexencoder_conllu.cpp - CoNLL-U input (see the header)
 
 #include "flexencoder_conllu.hpp"
+#include "flexencoder_conllu_comments.hpp"
 #include "flexencoder_misc_rules.hpp"
 
 #include <algorithm>
@@ -15,11 +16,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string_view trim(std::string_view s) {
-    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.remove_suffix(1);
-    return s;
-}
+using Attrs = std::map<std::string, std::string>;
 
 std::vector<std::string_view> split_tab(std::string_view line) {
     std::vector<std::string_view> out;
@@ -32,13 +29,9 @@ std::vector<std::string_view> split_tab(std::string_view line) {
     }
 }
 
-// `# key = value` (or `# key`): false for a line that is no comment
-bool comment(std::string_view line, std::string_view& key, std::string_view& value) {
-    if (line.empty() || line[0] != '#') return false;
-    line.remove_prefix(1);
-    const std::size_t eq = line.find('=');
-    key = trim(line.substr(0, eq));
-    value = eq == std::string_view::npos ? std::string_view() : trim(line.substr(eq + 1));
+bool blank(std::string_view s) {
+    for (char c : s)
+        if (c != ' ' && c != '\t' && c != '\r') return false;
     return true;
 }
 
@@ -57,7 +50,8 @@ void for_each_misc(std::string_view misc, F&& f) {
     }
 }
 
-bool is_word_line(const std::vector<std::string_view>& c, bool& multiword, bool& empty) {
+// a word line: 10 columns; `multiword` for an ID range (3-4), `empty` for an empty node (8.1)
+bool word_line(const std::vector<std::string_view>& c, bool& multiword, bool& empty) {
     multiword = empty = false;
     if (c.size() < 10) return false;
     multiword = c[0].find('-') != std::string_view::npos;
@@ -65,22 +59,20 @@ bool is_word_line(const std::vector<std::string_view>& c, bool& multiword, bool&
     return true;
 }
 
+bool all_digits(std::string_view s) {
+    if (s.empty()) return false;
+    for (char c : s)
+        if (c < '0' || c > '9') return false;
+    return true;
+}
+
 void add_unique(std::vector<std::string>& v, const std::string& x) {
     if (std::find(v.begin(), v.end(), x) == v.end()) v.push_back(x);
 }
 
-// sentence comments the reader handles itself (not attributes of `s`)
-bool structural_comment(std::string_view key) {
-    return key == "newdoc" || key == "newdoc id" || key == "newpar" || key == "newpar id" || key.rfind("global.", 0) == 0 ||
-           key.rfind("meta::", 0) == 0;
-}
-
-std::string sentence_attr_name(std::string_view key) {
-    if (key == "sent_id") return "id";
-    std::string k(key);
-    for (char& ch : k)
-        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_') ch = '_';
-    return k;
+// the attributes pando-index gives every `text` / `doc` region (padded with `_`)
+void pad(Attrs& a, std::initializer_list<const char*> keys) {
+    for (const char* k : keys) a.emplace(k, "_");
 }
 
 }  // namespace
@@ -104,23 +96,25 @@ ConlluReader::ConlluReader(FlexConfig cfg, std::vector<std::string> inputs, Conl
 }
 
 void ConlluReader::detect() {
+    using K = ConlluComment::Kind;
     auto rules = make_misc_rules();
     std::vector<bool> rule_seen(rules.size(), false);
-    std::set<std::string> misc_seen, sent_keys;
-    bool any_par = false, any_contr = false;
+    std::set<std::string> misc_seen, regions;
+    bool any_contr = false;
     for (const auto& path : files_) {
         std::ifstream in(path);
         std::string line;
         while (std::getline(in, line)) {
-            std::string_view key, value;
-            if (comment(line, key, value)) {
-                if (key == "newpar" || key == "newpar id") any_par = true;
-                else if (!structural_comment(key) && !key.empty()) sent_keys.insert(sentence_attr_name(key));
+            if (!line.empty() && line[0] == '#') {
+                const ConlluComment c = classify_conllu_comment(line, true);
+                if (c.kind == K::NewDoc) regions.insert("doc");
+                else if (c.kind == K::NewPar) regions.insert("par");
+                else if (c.kind == K::NewRegion && c.name != "s") regions.insert(c.name);
                 continue;
             }
             const auto c = split_tab(line);
             bool mw = false, empty = false;
-            if (!is_word_line(c, mw, empty) || empty) continue;
+            if (!word_line(c, mw, empty) || empty) continue;
             if (mw) {
                 any_contr = true;
                 continue;
@@ -139,18 +133,20 @@ void ConlluReader::detect() {
     for (const char* a : {"form", "lemma", "upos", "xpos", "feats", "deprel"}) add_unique(cfg_.pando_jsonl2_positional, a);
     for (const auto& k : opts_.misc_keys)
         if (misc_seen.count(k)) add_unique(cfg_.pando_jsonl2_positional, k);
-    for (const char* st : {"text", "s"}) add_unique(cfg_.pando_jsonl2_structural, st);
-    if (any_par) add_unique(cfg_.pando_jsonl2_structural, "par");
+    add_unique(cfg_.pando_jsonl2_structural, "s");
     if (any_contr) add_unique(cfg_.pando_jsonl2_structural, "contr");
+    for (const auto& r : regions) add_unique(cfg_.pando_jsonl2_structural, r);
+    // the units a convention's ids are unique in: `# newdoc` documents, else the files
+    const std::string scope = regions.count("doc") ? "doc" : regions.count("text") ? "text" : "corpus";
     for (std::size_t r = 0; r < rules.size(); ++r)
         if (rule_seen[r]) {
-            rules[r]->declare(cfg_);
+            rules[r]->declare(cfg_, scope);
             if (cfg_.verbose) std::cerr << "[flexencoder] CoNLL-U: " << rules[r]->name() << " found\n";
         }
-    (void)sent_keys;   // sentence comments become attributes of `s` as they come (regions take any attribute)
 }
 
 void ConlluReader::run(std::vector<std::unique_ptr<IFlexBackendWriter>>& writers) {
+    using K = ConlluComment::Kind;
     detect();
     for (auto& w : writers) w->begin_corpus(cfg_);
     auto rules = make_misc_rules();
@@ -162,141 +158,156 @@ void ConlluReader::run(std::vector<std::unique_ptr<IFlexBackendWriter>>& writers
         if (!in) throw std::runtime_error("cannot read " + path);
         const std::string stem = fs::path(path).stem().string();
 
-        // the current document (a `# newdoc`, else the file)
-        FlexDocumentMeta doc;
+        FlexDocumentMeta file_doc;
+        file_doc.doc_id = stem;
+        file_doc.path = path;
+        for (auto& w : writers) w->begin_document(file_doc);
         std::vector<FlexToken> tokens;
         std::vector<FlexRegion> regions;
         std::vector<FlexRelation> relations;
-        bool doc_open = false;
-        std::uint64_t doc_start = 0;
-        std::map<std::string, std::string> doc_attrs;
         MiscRuleSink sink{[&](FlexRegion r) { regions.push_back(std::move(r)); },
                           [&](FlexRelation r) { relations.push_back(std::move(r)); }};
 
-        auto open_doc = [&](const std::string& id) {
-            doc = FlexDocumentMeta{};
-            doc.doc_id = id;
-            doc.path = path;
-            tokens.clear();
-            regions.clear();
-            relations.clear();
-            doc_attrs.clear();
-            doc_start = pos + 1;
-            doc_open = true;
-            for (auto& r : rules) r->begin_document(id);
-            for (auto& w : writers) w->begin_document(doc);
+        auto emit = [&](const std::string& type, std::uint64_t start, Attrs attrs) {
+            if (pos < start) return;   // no token
+            FlexRegion r;
+            r.doc_id = stem;
+            r.type = type;
+            r.start_pos = start;
+            r.end_pos = pos;
+            r.attrs = std::move(attrs);
+            regions.push_back(std::move(r));
         };
-        auto close_doc = [&]() {
-            if (!doc_open) return;
-            doc_open = false;
-            if (pos >= doc_start) {
-                for (auto& r : rules) r->end_document(pos, sink);
-                FlexRegion r;   // the document as the region `text`
-                r.doc_id = doc.doc_id;
-                r.type = "text";
-                r.id = doc.doc_id;
-                r.start_pos = doc_start;
-                r.end_pos = pos;
-                r.attrs = doc_attrs;
-                r.attrs["id"] = doc.doc_id;
-                r.attrs["file"] = stem;
-                regions.push_back(std::move(r));
-            }
-            for (auto& w : writers) {
-                for (const auto& t : tokens) w->add_token(t);
-                for (const auto& r : regions) w->add_region(r);
-                for (const auto& r : relations) w->add_relation(r);
-                w->end_document(doc);
-            }
+        // open regions: `text`, `doc`, `par`, and the `# newregion` ones (a stack: the last of a type is closed)
+        struct Open {
+            std::string type;
+            std::uint64_t start;
+            Attrs attrs;
+        };
+        std::vector<Open> open;
+        auto find_open = [&](const std::string& type) {
+            for (auto it = open.rbegin(); it != open.rend(); ++it)
+                if (it->type == type) return &*it;
+            return static_cast<Open*>(nullptr);
+        };
+        auto close = [&](const std::string& type) {
+            for (auto it = open.rbegin(); it != open.rend(); ++it)
+                if (it->type == type) {
+                    Attrs a = std::move(it->attrs);
+                    if (type == "text") pad(a, {"id", "genre", "lang", "langcode", "treebank", "century"});
+                    if (type == "doc") pad(a, {"id", "lang", "langcode"});
+                    emit(type, it->start, std::move(a));
+                    open.erase(std::next(it).base());
+                    return;
+                }
         };
 
-        // the current sentence and paragraph
-        std::uint64_t sent_start = 0;
-        std::map<std::string, std::string> sent_attrs;
-        bool in_par = false;
-        std::uint64_t par_start = 0;
-        std::string par_id;
-        auto close_par = [&](std::uint64_t end) {
-            if (!in_par || end < par_start) return;
-            FlexRegion r;
-            r.doc_id = doc.doc_id;
-            r.type = "par";
-            r.start_pos = par_start;
-            r.end_pos = end;
-            if (!par_id.empty()) r.attrs["id"] = par_id;
-            regions.push_back(std::move(r));
-            in_par = false;
+        // the convention rules' document: a `# newdoc`, else the file
+        bool rule_doc = false;
+        auto end_rule_doc = [&]() {
+            if (!rule_doc) return;
+            for (auto& r : rules) r->end_document(pos, sink);
+            rule_doc = false;
         };
-        auto close_sentence = [&]() {
-            if (sent_start == 0 || pos < sent_start) {
-                sent_start = 0;
-                return;
+        auto begin_rule_doc = [&](const std::string& id) {
+            end_rule_doc();
+            for (auto& r : rules) r->begin_document(id);
+            rule_doc = true;
+        };
+
+        // the current sentence
+        std::uint64_t sent_start = 0;
+        Attrs sent_attrs;
+        std::string sent_tuid;
+        bool sentence_context = true;   // before the first token line, or after a blank line until the next one
+        auto end_sentence = [&]() {
+            if (sent_start != 0) {
+                Attrs a = std::move(sent_attrs);
+                emit("s", sent_start, std::move(a));
             }
-            FlexRegion r;
-            r.doc_id = doc.doc_id;
-            r.type = "s";
-            r.start_pos = sent_start;
-            r.end_pos = pos;
-            r.attrs = sent_attrs;
-            if (auto it = sent_attrs.find("id"); it != sent_attrs.end()) r.id = it->second;
-            regions.push_back(std::move(r));
             sent_start = 0;
             sent_attrs.clear();
+            sent_tuid.clear();
         };
 
-        std::string line;
-        // a multiword token's range and form, applied as a `contr` region when its last word has come
+        // a multiword token's range and form: a `contr` region when its last word has come
         std::uint64_t mw_first = 0, mw_last = 0;
         std::string mw_form;
+
+        std::string line;
         while (std::getline(in, line)) {
-            std::string_view key, value;
-            if (comment(line, key, value)) {
-                if (key == "newdoc" || key == "newdoc id") {
-                    close_sentence();
-                    close_par(pos);
-                    close_doc();
-                    open_doc(value.empty() ? stem + "-" + std::to_string(pos + 1) : std::string(value));
-                } else if (key == "newpar" || key == "newpar id") {
-                    close_par(pos);
-                    in_par = true;
-                    par_start = pos + 1;
-                    par_id = std::string(value);
-                } else if (key.rfind("meta::", 0) == 0) {
-                    doc_attrs[sentence_attr_name(key.substr(6))] = std::string(value);
-                } else if (key.rfind("global.", 0) == 0) {
-                    for (auto& r : rules) r->on_comment(key, value);
-                } else if (!key.empty()) {
-                    sent_attrs[sentence_attr_name(key)] = std::string(value);
-                }
+            if (line.empty() || blank(line)) {
+                end_sentence();
+                sentence_context = true;
                 continue;
             }
-            if (trim(line).empty()) {
-                close_sentence();
+            if (line[0] == '#') {
+                const ConlluComment c = classify_conllu_comment(line, sentence_context);
+                switch (c.kind) {
+                    case K::NewRegion:
+                        if (c.name == "s") break;   // sentences come from the blank lines
+                        close(c.name);
+                        open.push_back({c.name, pos + 1, {}});
+                        break;
+                    case K::EndRegion:
+                        if (c.name != "s") close(c.name);
+                        break;
+                    case K::NewDoc: {
+                        close("doc");
+                        const std::string id = c.value.empty() ? "_" : c.value;
+                        open.push_back({"doc", pos + 1, {{"id", id}}});
+                        begin_rule_doc(c.value.empty() ? stem + "#" + std::to_string(pos + 1) : c.value);
+                        break;
+                    }
+                    case K::NewPar:
+                        close("par");
+                        open.push_back({"par", pos + 1, {{"id", c.value.empty() ? "_" : c.value}}});
+                        break;
+                    case K::SentAttr:
+                        sent_attrs[c.key] = c.value;
+                        if (c.key == "tuid") sent_tuid = c.value;
+                        break;
+                    case K::RegionAttr:
+                        if (Open* o = find_open(c.name)) o->attrs[c.key] = c.value;
+                        break;
+                    case K::DocMeta:
+                        if (Open* o = find_open("doc")) o->attrs[c.key] = c.value;
+                        break;
+                    case K::Global:
+                        for (auto& r : rules) r->on_comment(c.key, c.value);
+                        break;
+                    case K::None:
+                        break;
+                }
                 continue;
             }
             const auto c = split_tab(line);
             bool mw = false, empty = false;
-            if (!is_word_line(c, mw, empty) || empty) continue;
-            if (!doc_open) open_doc(stem);
+            if (!word_line(c, mw, empty) || empty) continue;
             if (mw) {
                 const std::size_t dash = c[0].find('-');
-                const long long a = std::stoll(std::string(c[0].substr(0, dash)));
-                const long long b = std::stoll(std::string(c[0].substr(dash + 1)));
-                mw_first = pos + 1;
-                mw_last = pos + static_cast<std::uint64_t>(b - a + 1);
-                mw_form = std::string(c[1]);
+                const std::string_view a = c[0].substr(0, dash), b = c[0].substr(dash + 1);
+                if (all_digits(a) && all_digits(b) && std::stoll(std::string(b)) >= std::stoll(std::string(a))) {
+                    mw_first = pos + 1;
+                    mw_last = pos + static_cast<std::uint64_t>(std::stoll(std::string(b)) - std::stoll(std::string(a)) + 1);
+                    mw_form = std::string(c[1]);
+                }
                 continue;
             }
+            if (!rule_doc) begin_rule_doc(stem);
+            sentence_context = false;
             ++pos;
             if (sent_start == 0) sent_start = pos;
             FlexToken t;
-            t.doc_id = doc.doc_id;
-            t.tok_id = std::string(c[0]);   // the head (HEAD) is numbered within the sentence, as the writers read it
+            t.doc_id = stem;
+            t.tok_id = std::string(c[0]);   // HEAD is numbered within the sentence, as the writers read it
             t.global_pos = pos;
-            const char* names[] = {"form", "lemma", "upos", "xpos", "feats"};
-            for (int k = 0; k < 5; ++k) t.attrs[names[k]] = std::string(c[static_cast<std::size_t>(k + 1)]);
-            if (c[6] != "_") t.attrs["head"] = std::string(c[6]);
+            static const char* const names[] = {"form", "lemma", "upos", "xpos", "feats"};
+            for (std::size_t k = 0; k < 5; ++k) t.attrs[names[k]] = std::string(c[k + 1]);
+            if (all_digits(c[6])) t.attrs["head"] = std::string(c[6]);
             t.attrs["deprel"] = std::string(c[7]);
+            t.attrs["deps"] = std::string(c[8]);   // enhanced dependencies (the writers' relation layer `deps`)
+            if (!sent_tuid.empty() && misc_keys.count("tuid")) t.attrs["tuid"] = sent_tuid;   // MISC tuid= overrides
             std::set<MiscRule*> claimed;
             for_each_misc(c[9], [&](std::string_view k, std::string_view v) {
                 for (auto& r : rules)
@@ -311,19 +322,19 @@ void ConlluReader::run(std::vector<std::unique_ptr<IFlexBackendWriter>>& writers
                 if (!claimed.count(r.get())) r->on_other_token(pos, t);
             tokens.push_back(std::move(t));
             if (mw_last != 0 && pos == mw_last) {
-                FlexRegion r;
-                r.doc_id = doc.doc_id;
-                r.type = "contr";
-                r.start_pos = mw_first;
-                r.end_pos = mw_last;
-                r.attrs["form"] = mw_form;
-                regions.push_back(std::move(r));
+                emit("contr", mw_first, {{"form", mw_form}});
                 mw_first = mw_last = 0;
             }
         }
-        close_sentence();
-        close_par(pos);
-        close_doc();
+        end_sentence();
+        end_rule_doc();
+        while (!open.empty()) close(open.back().type);
+        for (auto& w : writers) {
+            for (const auto& t : tokens) w->add_token(t);
+            for (const auto& r : regions) w->add_region(r);
+            for (const auto& r : relations) w->add_relation(r);
+            w->end_document(file_doc);
+        }
     }
     for (auto& w : writers) w->end_corpus();
 }
