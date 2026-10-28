@@ -1110,14 +1110,14 @@ inline std::string to_flexicorp_json(
     std::ostringstream out;
     if (!ms.parallel_matches.empty()) {
         const size_t stored = ms.parallel_matches.size();
-        // For aligned pairs, downstream UI expects source-hit pagination semantics.
-        // Emit all available pairs here and expose explicit pair counters.
-        const size_t start = 0;
-        const size_t end = stored;
+        // A page of pairs (flexicorp shows each pair as a hit; total = the pairs): a `with` whose sides nothing
+        // links has hundreds of thousands, each with an XML fragment, so only the page's are built.
+        const size_t start = std::min(opts.offset, stored);
+        const size_t end = opts.limit == 0 ? stored : std::min(start + opts.limit, stored);
         const size_t returned = end - start;
         std::unordered_set<CorpusPos> source_pos_seen;
-        source_pos_seen.reserve(stored);
-        for (size_t i = 0; i < stored; ++i) {
+        source_pos_seen.reserve(returned);
+        for (size_t i = start; i < end; ++i) {
             source_pos_seen.insert(ms.parallel_matches[i].first.first_pos());
         }
         const size_t returned_sources = source_pos_seen.size();
@@ -1188,15 +1188,17 @@ inline std::string to_flexicorp_json(
             }
             return parallel_match_tuid(corpus, m);
         };
-        for (size_t pi = 0; pi < stored; ++pi) {
+        for (size_t pi = start; pi < end; ++pi) {
             const auto& pr0 = ms.parallel_matches[pi];
             pre_src_tuid[pi] = resolve_side_tuid(pr0.first);
             pre_tgt_tuid[pi] = resolve_side_tuid(pr0.second);
             std::string sid = parallel_match_text_setid(corpus, pr0.first);
             if (sid.empty()) sid = parallel_match_text_setid(corpus, pr0.second);
             pre_setid[pi] = sid;
-            parallel_by_src_start[pr0.first.first_pos()].push_back(pi);
         }
+        // every pair by its source hit (a window of one source shows all its aligned documents, on the page or not)
+        for (size_t pi = 0; pi < stored; ++pi) parallel_by_src_start[ms.parallel_matches[pi].first.first_pos()].push_back(pi);
+        std::unordered_map<CorpusPos, std::pair<std::string, std::string>> group_of_source;   // (docs, tuids), once each
 
         auto emit_side = [&](std::ostream& os,
                              const Match& m,
@@ -1267,6 +1269,7 @@ inline std::string to_flexicorp_json(
         out << "    \"result\": {\n";
         out << "      \"parallel\": true,\n";
         out << "      \"total\": " << returned_sources << ",\n";
+        out << "      \"total\": " << ms.total_count << ",\n";
         out << "      \"returned\": " << returned_sources << ",\n";
         out << "      \"total_pairs\": " << ms.total_count << ",\n";
         out << "      \"returned_pairs\": " << returned << ",\n";
@@ -1300,9 +1303,11 @@ inline std::string to_flexicorp_json(
             else if (!ps_tuid.empty()) pair_tuids = ps_tuid;
             else pair_tuids = pt_tuid;
 
+            const CorpusPos src_key = src.first_pos();
+            auto cached = group_of_source.find(src_key);
+            if (cached == group_of_source.end()) {
             std::string group_docs;
             std::string group_tuids;
-            const CorpusPos src_key = src.first_pos();
             const auto git = parallel_by_src_start.find(src_key);
             if (git != parallel_by_src_start.end()) {
                 const std::vector<size_t>& idxs = git->second;
@@ -1310,7 +1315,7 @@ inline std::string to_flexicorp_json(
                 std::vector<std::string> gtuids;
                 const std::string sd = teitok_xml_basename_for_doc_id(src_doc_id);
                 if (!sd.empty()) gdocs.push_back(sd);
-                if (!idxs.empty() && !pre_src_tuid[idxs[0]].empty()) gtuids.push_back(pre_src_tuid[idxs[0]]);
+                if (!pre_src_tuid[i].empty()) gtuids.push_back(pre_src_tuid[i]);
                 for (size_t pj : idxs) {
                     const auto& prj = ms.parallel_matches[pj];
                     const std::string tjd = std::string(lookup_doc_id(corpus, prj.second.first_pos()));
@@ -1325,7 +1330,8 @@ inline std::string to_flexicorp_json(
                         }
                         if (!dup) gdocs.push_back(td);
                     }
-                    if (!pre_tgt_tuid[pj].empty()) gtuids.push_back(pre_tgt_tuid[pj]);
+                    const std::string tj = (pj >= start && pj < end) ? pre_tgt_tuid[pj] : parallel_match_tuid(corpus, prj.second);
+                    if (!tj.empty()) gtuids.push_back(tj);
                 }
                 for (size_t k = 0; k < gdocs.size(); ++k) {
                     if (k) group_docs += ",";
@@ -1336,6 +1342,10 @@ inline std::string to_flexicorp_json(
                     group_tuids += gtuids[k];
                 }
             }
+            cached = group_of_source.emplace(src_key, std::make_pair(std::move(group_docs), std::move(group_tuids))).first;
+            }
+            const std::string& group_docs = cached->second.first;
+            const std::string& group_tuids = cached->second.second;
 
             if (!pair_docs.empty()) {
                 out << ", \"teitok_tuview\": {";
@@ -1350,7 +1360,9 @@ inline std::string to_flexicorp_json(
         out << "\n      ],\n";
         out << "      \"result_type\": \"hits\"\n";
         out << "    },\n";
-        out << "    \"warnings\": [],\n";
+        out << "    \"warnings\": [";   // pando's notes on a query that ran (a `with` nothing links)
+        for (size_t wi = 0; wi < ms.warnings.size(); ++wi) out << (wi ? ", " : "") << jstr(ms.warnings[wi]);
+        out << "],\n";
         out << "    \"errors\": []\n";
         out << "  }\n";
         out << "}\n";
@@ -1531,7 +1543,9 @@ inline std::string to_flexicorp_json(
     }
     out << "      \"result_type\": \"hits\"\n";
     out << "    },\n";
-    out << "    \"warnings\": [],\n";
+    out << "    \"warnings\": [";
+    for (size_t wi = 0; wi < ms.warnings.size(); ++wi) out << (wi ? ", " : "") << jstr(ms.warnings[wi]);
+    out << "],\n";
     out << "    \"errors\": []\n";
     out << "  }\n";
     out << "}\n";
