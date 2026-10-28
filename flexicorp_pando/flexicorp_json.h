@@ -1432,6 +1432,45 @@ inline std::string to_flexicorp_json(
             )) {
             if (doc_id.empty()) doc_id = xidx_doc_id;
         }
+        // tokens of one hit in different sentences (a coreference chain, `=:coref`): each token's own sentence, a
+        // <gap/> between sentences that do not follow each other, not every sentence from the first token to the
+        // last. `context_pieces` gives them with their corpus positions (flexicorp merges a chain's hits by them).
+        std::string context_pieces;
+        if (!xidx_fragment.empty() && m.positions.size() > 1 && corpus.has_structure(context_scope)) {
+            const auto& sa = corpus.structure(context_scope);
+            std::vector<int64_t> regions;
+            for (CorpusPos p : m.positions) {
+                if (p == NO_HEAD) continue;
+                const int64_t r = sa.find_region(p);
+                if (r >= 0) regions.push_back(r);
+            }
+            std::sort(regions.begin(), regions.end());
+            regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
+            if (regions.size() > 1) {   // one piece per sentence (flexicorp merges a row's pieces without overlaps)
+                std::string joined;
+                CorpusPos prev_end = 0;
+                bool ok = true;
+                for (size_t k = 0; k < regions.size() && ok; ++k) {
+                    const Region rg = sa.region_data()[regions[k]];
+                    std::string one_doc, one;
+                    ok = xidx_lookup_fragment(index_dir, xidx_project_root, static_cast<int64_t>(rg.start),
+                                              static_cast<int64_t>(rg.start), context_scope, one_doc, one, -1, -1);
+                    if (!ok) break;
+                    one = sanitize_xml_fragment_edges(one);
+                    if (k) joined += (rg.start == prev_end + 1) ? " " : " <gap/> ";   // adjacent sentences: no gap
+                    joined += one;
+                    context_pieces += std::string(k ? ", " : "") + "{\"start\": " + std::to_string(rg.start)
+                                      + ", \"end\": " + std::to_string(rg.end) + ", \"fragment\": " + jstr(one) + "}";
+                    prev_end = rg.end;
+                }
+                if (ok) xidx_fragment = std::move(joined);
+                else context_pieces.clear();
+            } else if (!regions.empty()) {   // one sentence: the fragment as it is, with its bounds
+                const Region a0 = sa.region_data()[regions.front()], a1 = a0;
+                context_pieces = "{\"start\": " + std::to_string(a0.start) + ", \"end\": " + std::to_string(a1.end)
+                                 + ", \"fragment\": " + jstr(sanitize_xml_fragment_edges(xidx_fragment)) + "}";
+            }
+        }
         auto ctx = build_context(corpus, m, opts.context);
 
         if (i > start) out << ",\n";
@@ -1470,6 +1509,7 @@ inline std::string to_flexicorp_json(
             out << ", \"context_xml\": " << jstr(xidx_fragment);
             out << ", \"context_data\": " << jstr(xidx_fragment);
             out << ", \"fragment\": " << jstr(xidx_fragment);
+            if (!context_pieces.empty()) out << ", \"context_pieces\": [" << context_pieces << "]";
         }
         // Same pattributes as CQP tabulate (match facs / match bbox) so TEITOK can show facsimile.
         //
