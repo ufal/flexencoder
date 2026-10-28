@@ -103,6 +103,10 @@ void PandoApiWriter::begin_corpus(const FlexConfig& cfg) {
     builder_->set_default_within("text");
     // the settings' multivalue attributes (values written '|'-joined below, whatever multisep they use)
     for (const auto& f : multivalue_fields_) builder_->declare_multivalue(f);
+    for (const auto& s : cfg_snapshot_.pando_jsonl2_nested) builder_->declare_nested(s);
+    for (const auto& s : cfg_snapshot_.pando_jsonl2_overlapping) builder_->declare_overlapping(s);
+    for (const auto& s : cfg_snapshot_.pando_jsonl2_zerowidth) builder_->declare_zerowidth(s);
+    for (const auto& [name, spec] : cfg_snapshot_.pando_relations) builder_->declare_relation(name, spec);
 #endif
 }
 
@@ -149,6 +153,14 @@ void PandoApiWriter::add_region(const FlexRegion& reg) {
     BufferedRegion br;
     br.reg = reg;
     doc_regions_.push_back(std::move(br));
+#endif
+}
+
+void PandoApiWriter::add_relation(const FlexRelation& rel) {
+#ifdef USE_PANDO_API
+    doc_relations_.push_back(rel);
+#else
+    (void)rel;
 #endif
 }
 
@@ -274,6 +286,15 @@ void PandoApiWriter::flush_document() {
         pando::CorpusPos end   = static_cast<pando::CorpusPos>(ie) - 1;
         builder_->add_region(br.reg.type, start, end, rattrs);
     }
+
+    // Relations, between indexed tokens (an end that is left out drops the edge)
+    for (const auto& rel : doc_relations_) {
+        const std::uint64_t s = pos_.start_of(rel.source_pos), t = pos_.start_of(rel.target_pos);
+        if (pos_.end_of(rel.source_pos) != s || pos_.end_of(rel.target_pos) != t) continue;
+        builder_->add_relation(rel.layer, static_cast<pando::CorpusPos>(s) - 1, static_cast<pando::CorpusPos>(t) - 1,
+                               rel.label);
+    }
+    doc_relations_.clear();
 #endif
 }
 

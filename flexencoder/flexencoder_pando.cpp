@@ -250,6 +250,19 @@ void PandoEventsWriter::write_header_line() {
         O() << ']';
     }
 
+    if (!cfg_snapshot_.pando_relations.empty()) {
+        O() << ",\"relations\":{";
+        bool first = true;
+        for (const auto& [name, spec] : cfg_snapshot_.pando_relations) {
+            if (!first) O() << ',';
+            first = false;
+            write_json_string(name);
+            O() << ':';
+            write_json_string(spec);
+        }
+        O() << '}';
+    }
+
     O() << "}\n";
 }
 
@@ -263,6 +276,10 @@ void PandoEventsWriter::begin_document(const FlexDocumentMeta& doc) {
     doc_regions_.clear();
     has_active_doc_ = true;
     doc_closed_ = false;
+}
+
+void PandoEventsWriter::add_relation(const FlexRelation& rel) {
+    doc_relations_.push_back(rel);
 }
 
 void PandoEventsWriter::add_region(const FlexRegion& reg) {
@@ -613,8 +630,23 @@ void PandoEventsWriter::flush_current_document() {
         write_region_event(reg.type, start0, end0, attrs);
     }
 
+    // Relations, between indexed tokens (an end that is left out drops the edge)
+    for (const auto& rel : doc_relations_) {
+        const std::uint64_t s = pos_.start_of(rel.source_pos), t = pos_.start_of(rel.target_pos);
+        if (pos_.end_of(rel.source_pos) != s || pos_.end_of(rel.target_pos) != t) continue;
+        O() << "{\"type\":\"relation\",\"layer\":";
+        write_json_string(rel.layer);
+        O() << ",\"source\":" << (s - 1) << ",\"target\":" << (t - 1);
+        if (!rel.label.empty()) {
+            O() << ",\"label\":";
+            write_json_string(rel.label);
+        }
+        O() << "}\n";
+    }
+
     doc_tokens_.clear();
     doc_regions_.clear();
+    doc_relations_.clear();
     has_active_doc_ = false;
     doc_closed_ = false;
     current_doc_id_.clear();

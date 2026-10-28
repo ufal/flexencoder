@@ -25,6 +25,7 @@ public:
     void begin_document(const FlexDocumentMeta& doc) override;
     void add_token(const FlexToken& tok) override;
     void add_region(const FlexRegion& reg) override;
+    void add_relation(const FlexRelation& rel) override;
     void end_document(const FlexDocumentMeta& doc) override;
     void end_corpus() override;
 
@@ -45,6 +46,7 @@ private:
     };
     std::vector<BufferedToken> doc_tokens_;
     std::vector<BufferedRegion> doc_regions_;
+    std::vector<FlexRelation> doc_relations_;
     // positions as the builder assigns them (left-out tokens take none): region bounds
     IndexPosMap pos_;
     std::string sentence_region_type_{"seg"};

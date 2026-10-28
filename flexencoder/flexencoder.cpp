@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 
+#include "flexencoder_conllu.hpp"
 #include "pugixml.hpp"  // full type needed for FlexExtractor's unique_ptr<xml_document>
 #include "flexencoder.hpp"
 #include "functions.hpp"
@@ -156,6 +157,11 @@ static void print_usage(const char* argv0) {
         << "                  ClickHouse is opt-in (--output-clickhouse). Manatee: --output-vrt (VRT for encodevert).\n"
         << "  --verbose        Print progress (file and token count per document)\n";
     std::cerr
+        << "  --conllu PATH    Read CoNLL-U instead of TEITOK XML: a file, or a folder (every *.conllu in it);\n"
+        << "                  may be repeated. What the input uses is declared from the input itself: MISC conventions\n"
+        << "                  (CorefUD Entity=, GUM Discourse=) become their regions and relation layers.\n"
+        << "  --misc-keys K1,K2,...   With --conllu: the plain MISC keys indexed as token attributes when present\n"
+        << "                  (default: tuid,Translit,Vform,LTranslt,Root,CorrectForm,Gloss)\n"
         << "  --conllu-underscore-as-empty   Treat literal '_' token values as empty (CoNLL-U placeholder)\n"
         << "  --conllu-underscore-keep-keys K1,K2,...   Keys that keep literal '_' when the flag is set\n"
         << "                  (default: form,lemma,word)\n";
@@ -172,6 +178,8 @@ int main(int argc, char** argv) {
     std::string output_pando_events;
     bool pando_events_explicit = false;
     bool build_all = false;
+    std::vector<std::string> conllu_inputs;
+    ConlluOptions conllu_opts;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -213,6 +221,12 @@ int main(int argc, char** argv) {
             build_all = true;
         } else if (arg == "--verbose" || arg == "-v") {
             cfg.verbose = true;
+        } else if (arg == "--conllu" && i + 1 < argc) {
+            conllu_inputs.push_back(argv[++i]);
+        } else if (arg == "--misc-keys" && i + 1 < argc) {
+            conllu_opts.misc_keys.clear();
+            for (const auto& part : split(argv[++i], ","))
+                if (!trim(part).empty()) conllu_opts.misc_keys.push_back(trim(part));
         } else if (arg == "--conllu-underscore-as-empty") {
             cfg.conllu_underscore_as_empty = true;
         } else if (arg == "--conllu-underscore-keep-keys" && i + 1 < argc) {
@@ -372,8 +386,9 @@ int main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<IFlexBackendWriter>> writers;
     // Always build backend-agnostic xidx so all backends can resolve corpus
-    // positions to TEITOK XML fragments without relying on CWB-specific xidx files.
-    writers.push_back(std::make_unique<XidxWriter>(cfg.project_root, output_xidx));
+    // positions to TEITOK XML fragments without relying on CWB-specific xidx files
+    // (CoNLL-U input has no XML to point to).
+    if (conllu_inputs.empty()) writers.push_back(std::make_unique<XidxWriter>(cfg.project_root, output_xidx));
     if (!output_dir.empty()) {
         writers.push_back(std::make_unique<CwbWriter>(output_dir));
     }
@@ -398,9 +413,14 @@ int main(int argc, char** argv) {
     }
     writers.push_back(std::make_unique<StatsWriter>());
 
-    FlexExtractor extractor(cfg);
     try {
-        extractor.run(writers);
+        if (!conllu_inputs.empty()) {
+            ConlluReader reader(cfg, conllu_inputs, conllu_opts);
+            reader.run(writers);
+        } else {
+            FlexExtractor extractor(cfg);
+            extractor.run(writers);
+        }
     } catch (const std::exception& e) {
         std::cerr << "[flexencoder] " << e.what() << std::endl;
         return 1;

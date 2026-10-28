@@ -40,6 +40,7 @@ public:
     void begin_document(const FlexDocumentMeta& doc) override;
     void add_token(const FlexToken& tok) override;
     void add_region(const FlexRegion& reg) override;
+    void add_relation(const FlexRelation& rel) override;
     void end_document(const FlexDocumentMeta& doc) override;
     void end_corpus() override;
     std::string failure() const override { return failure_; }
@@ -68,6 +69,7 @@ private:
 
     std::vector<FlexToken> doc_tokens_;
     std::vector<FlexRegion> doc_regions_;
+    std::vector<FlexRelation> doc_relations_;
     // positions as pando-index assigns them (left-out tokens take none): region bounds
     IndexPosMap pos_;
     std::string current_doc_id_;

@@ -58,6 +58,9 @@ struct FlexConfig {
     std::vector<std::string> pando_jsonl2_nested;        // struct types
     std::vector<std::string> pando_jsonl2_overlapping;   // struct types
     std::vector<std::string> pando_jsonl2_zerowidth;      // struct types
+    /** Relation layers (name → declaration as in Pando's corpus.info: "pointer,label=rel,scope=doc",
+     *  "equivalence,attr=coref"); a pointer layer's edges come as FlexRelation events. */
+    std::map<std::string, std::string> pando_relations;
     std::string pando_jsonl2_default_within{"text"};
     bool pando_jsonl2_split_feats{false};
 
@@ -163,6 +166,17 @@ struct FlexRegion {
     std::string fulltext;
 };
 
+/** A link between two tokens of a document (a discourse relation, an antecedent, ...), from `source` attached to
+ *  `target` (as a dependent to its head), in a relation layer declared in cfg.pando_relations. Positions are
+ *  global_pos (1-based). Backends that have no relation layers ignore it. */
+struct FlexRelation {
+    std::string doc_id;
+    std::string layer;
+    std::string label;
+    std::uint64_t source_pos{0};
+    std::uint64_t target_pos{0};
+};
+
 /**
  * Positions in the Pando index (1-based here, like global_pos): the tokens left out
  * (flextoken_left_out_of_index) take no position, so every later token moves up. Pando
@@ -244,6 +258,8 @@ public:
     virtual void begin_document(const FlexDocumentMeta& doc) = 0;
     virtual void add_token(const FlexToken& tok) = 0;
     virtual void add_region(const FlexRegion& reg) = 0;
+    /** A relation of the current document (after its tokens); default: ignored (backends without relation layers). */
+    virtual void add_relation(const FlexRelation& rel) { (void)rel; }
     virtual void end_document(const FlexDocumentMeta& doc) = 0;
     virtual void end_corpus() = 0;
     /** After end_corpus(): non-empty when this backend's output is unusable (flexencoder then exits 1). */
