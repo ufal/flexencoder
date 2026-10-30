@@ -1223,7 +1223,7 @@ inline std::string to_flexicorp_json(
         std::vector<std::string> pre_tgt_tuid(stored);
         std::vector<std::string> pre_setid(stored);
         std::unordered_map<CorpusPos, std::vector<size_t>> parallel_by_src_start;
-        parallel_by_src_start.reserve(stored);
+        parallel_by_src_start.reserve(returned_sources);
 
         // Match non-parallel hits (below): use "corpus_pos" so the part-of-speech attribute "pos"
         // does not collide with JSON duplicate keys (many parsers keep the last "pos", wiping the
@@ -1292,8 +1292,16 @@ inline std::string to_flexicorp_json(
             if (sid.empty()) sid = parallel_match_text_setid(corpus, pr0.second);
             pre_setid[pi] = sid;
         }
-        // every pair by its source hit (a window of one source shows all its aligned documents, on the page or not)
-        for (size_t pi = 0; pi < stored; ++pi) parallel_by_src_start[ms.parallel_matches[pi].first.first_pos()].push_back(pi);
+        // every pair by its source hit (a window of one source shows all its aligned documents, on the page or not):
+        // the page's sources only, and at most kGroupPairs pairs each (a `with` whose sides nothing links gives a
+        // source millions of pairs)
+        constexpr size_t kGroupPairs = 500;
+        for (size_t pi = 0; pi < stored; ++pi) {
+            const CorpusPos sp = ms.parallel_matches[pi].first.first_pos();
+            if (!source_pos_seen.count(sp)) continue;
+            auto& v = parallel_by_src_start[sp];
+            if (v.size() < kGroupPairs) v.push_back(pi);
+        }
         std::unordered_map<CorpusPos, std::pair<std::string, std::string>> group_of_source;   // (docs, tuids), once each
 
         auto emit_side = [&](std::ostream& os,
@@ -1408,24 +1416,19 @@ inline std::string to_flexicorp_json(
             if (git != parallel_by_src_start.end()) {
                 const std::vector<size_t>& idxs = git->second;
                 std::vector<std::string> gdocs;
+                std::unordered_set<std::string> gdoc_seen;
                 std::vector<std::string> gtuids;
                 const std::string sd = teitok_xml_basename_for_doc_id(src_doc_id);
-                if (!sd.empty()) gdocs.push_back(sd);
+                if (!sd.empty()) {
+                    gdocs.push_back(sd);
+                    gdoc_seen.insert(sd);
+                }
                 if (!pre_src_tuid[i].empty()) gtuids.push_back(pre_src_tuid[i]);
                 for (size_t pj : idxs) {
                     const auto& prj = ms.parallel_matches[pj];
                     const std::string tjd = std::string(lookup_doc_id(corpus, prj.second.first_pos()));
                     const std::string td = teitok_xml_basename_for_doc_id(tjd);
-                    if (!td.empty()) {
-                        bool dup = false;
-                        for (const auto& ex : gdocs) {
-                            if (ex == td) {
-                                dup = true;
-                                break;
-                            }
-                        }
-                        if (!dup) gdocs.push_back(td);
-                    }
+                    if (!td.empty() && gdoc_seen.insert(td).second) gdocs.push_back(td);
                     const std::string tj = (pj >= start && pj < end) ? pre_tgt_tuid[pj] : parallel_match_tuid(corpus, prj.second);
                     if (!tj.empty()) gtuids.push_back(tj);
                 }
