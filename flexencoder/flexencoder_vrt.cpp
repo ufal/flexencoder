@@ -33,8 +33,16 @@ VrtWriter::VrtWriter(const std::string& output_path,
       server_(server),
       path_(path) {}
 
+// the fixed columns, in this order; the project's other token attributes follow them
+static const char* const kFixedCols[] = {"word", "lemma", "upos", "xpos", "feats", "deprel", "head", "misc"};
+
 void VrtWriter::begin_corpus(const FlexConfig& cfg) {
-    (void)cfg;
+    extra_cols_.clear();
+    for (const auto& k : cfg.pando_jsonl2_positional) {
+        if (k == "form" || k == cfg.wordfld) continue;
+        if (std::find(std::begin(kFixedCols), std::end(kFixedCols), k) != std::end(kFixedCols)) continue;
+        if (std::find(extra_cols_.begin(), extra_cols_.end(), k) == extra_cols_.end()) extra_cols_.push_back(k);
+    }
     out_.open(output_path_, std::ios::out | std::ios::trunc);
     if (!out_) {
         std::cerr << "[flexencoder] VrtWriter: failed to open " << output_path_ << " for writing\n";
@@ -46,7 +54,9 @@ void VrtWriter::begin_corpus(const FlexConfig& cfg) {
         out_ << " server=\"" << escape_xml_attr(server_) << "\"";
     if (!path_.empty())
         out_ << " path=\"" << escape_xml_attr(path_) << "\"";
-    out_ << " atts=\"word lemma upos xpos feats deprel head misc\">";
+    out_ << " atts=\"word lemma upos xpos feats deprel head misc";
+    for (const auto& k : extra_cols_) out_ << ' ' << escape_xml_attr(k);
+    out_ << "\">";
     out_ << "\n";
 }
 
@@ -109,7 +119,9 @@ void VrtWriter::add_token(const FlexToken& tok) {
              << feats << '\t'
              << deprel << '\t'
              << head << '\t'
-             << misc << '\n';
+             << misc;
+    for (const auto& k : extra_cols_) tmp_out_ << '\t' << get_attr(tok, k);
+    tmp_out_ << '\n';
 
     if (first_pos_doc_ == 0 || tok.global_pos < first_pos_doc_) {
         first_pos_doc_ = tok.global_pos;

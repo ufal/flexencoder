@@ -44,6 +44,8 @@ private:
     std::uint64_t first_pos_doc_{0};
     std::uint64_t last_pos_doc_{0};
     bool in_doc_{false};
+    /** The project's token attributes besides the fixed columns (OPUS's tree, hun, …): appended after misc. */
+    std::vector<std::string> extra_cols_;
 
     std::string get_attr(const FlexToken& tok, const std::string& key) const;
 };
