@@ -167,6 +167,39 @@ void flexicorp_pando_close(flexicorp_pando_ctx_t* ctx) {
     delete ctx;
 }
 
+namespace {
+
+// An aligned query (`within s_tuid having …`, Manatee's `A within de: B`): its page without counting every hit, and
+// its total from a sample (QueryExecutor::sampled_total), exact when the sample holds every hit. False for any
+// other query (the caller counts as before).
+bool aligned_page(const pando::Corpus& corpus, const pando::Program& prog, const char* query,
+                  const pando::QueryOptions& opts, pando::MatchSet& ms, double& elapsed, bool& estimated) {
+    if (prog.empty() || !prog[0].has_query) return false;
+    pando::QueryExecutor probe(corpus);
+    pando::TokenQuery lazy;
+    try {
+        if (!probe.lazy_aligned_query(prog[0].query, lazy)) return false;
+    } catch (const std::exception&) {
+        return false;   // a shape the lazy rewrite refuses: the query reports it as it runs
+    }
+    pando::QueryOptions page = opts;
+    page.total = false;
+    auto single = pando::run_single_query(corpus, query, page);
+    ms = std::move(single.first);
+    elapsed = single.second;
+    if (ms.total_exact) return true;   // the page held every hit
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    bool exact = false;
+    const size_t n = probe.sampled_total(lazy, &exact);
+    elapsed += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    ms.total_count = exact ? n : std::max(n, opts.offset + ms.matches.size() + 1);   // more follow the page
+    ms.total_exact = exact;
+    estimated = !exact;
+    return true;
+}
+
+}  // namespace
+
 char* flexicorp_pando_query(
     flexicorp_pando_ctx_t* ctx,
     const char* query,
@@ -274,6 +307,7 @@ char* flexicorp_pando_query(
             pando::TokenQuery parsed_query = is_parallel_query ? prog[0].query : flexicorp_pando::parse_query_for_groups(query);
             pando::MatchSet ms;
             double elapsed = 0.0;
+            bool total_estimated = false;
             if (is_parallel_query) {
                 pando::QueryExecutor executor(ctx->corpus);
                 const size_t max_m = (opts.max_total > 0)
@@ -284,7 +318,7 @@ char* flexicorp_pando_query(
                 ms = executor.execute_parallel(prog[0].query, prog[0].target_query, max_m, count_t);
                 auto t1 = std::chrono::high_resolution_clock::now();
                 elapsed = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            } else {
+            } else if (!aligned_page(ctx->corpus, prog, query, opts, ms, elapsed, total_estimated)) {
                 auto single = pando::run_single_query(ctx->corpus, query, opts);
                 ms = std::move(single.first);
                 elapsed = single.second;
@@ -300,7 +334,8 @@ char* flexicorp_pando_query(
                 frag_emit.context_scope,
                 ctx->xidx_project_root,
                 frag_emit.include_xidx_fragment,
-                &frag_emit);
+                &frag_emit,
+                total_estimated);
             return to_c_str(json);
         }
     } catch (const std::exception& e) {

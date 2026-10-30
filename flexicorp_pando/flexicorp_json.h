@@ -1184,7 +1184,8 @@ inline std::string to_flexicorp_json(
     const std::string& context_scope = "s",
     const std::string& xidx_project_root = "",
     bool include_xidx_fragment = true,
-    const PandoFragmentEmitPolicy* fragment_policy_meta = nullptr
+    const PandoFragmentEmitPolicy* fragment_policy_meta = nullptr,
+    bool total_estimated = false   // total from a sample (QueryExecutor::sampled_total), not counted
 ) {
     using namespace pando;
 
@@ -1372,7 +1373,7 @@ inline std::string to_flexicorp_json(
         out << "    \"operation\": \"query\",\n";
         out << "    \"result\": {\n";
         out << "      \"parallel\": true,\n";
-        out << "      \"total\": " << returned_sources << ",\n";
+        // (total: the pairs, as JSON readers took the second of two "total" keys that were written here before)
         out << "      \"total\": " << ms.total_count << ",\n";
         out << "      \"returned\": " << returned_sources << ",\n";
         out << "      \"total_pairs\": " << ms.total_count << ",\n";
@@ -1483,6 +1484,7 @@ inline std::string to_flexicorp_json(
     out << "      \"returned\": " << returned << ",\n";
     out << "      \"start\": " << start << ",\n";
     out << "      \"total_exact\": " << (ms.total_exact ? "true" : "false") << ",\n";
+    if (total_estimated) out << "      \"total_estimated\": true,\n";
     out << "      \"time_ms\": " << elapsed_ms << ",\n";
     out << "      \"query\": " << jstr(query_text) << ",\n";
     out << "      \"query_lang\": \"pando-cql\",\n";
