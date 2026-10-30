@@ -24,6 +24,7 @@ static void usage(const char* prog) {
         "                           If DIR is the bare name \"pando\", CWD is the project root\n"
         "                           (expects ./xidx next to ./pando for XML fragments on hits).\n"
         "  -q, --query QUERY        CQL query string (required)\n"
+        "  --version                The build as JSON: the adapter's and the linked pando's version and commit\n"
         "  --offset N               Skip first N hits (default: 0)\n"
         "  --limit N                Max hits to return (default: 50)\n"
         "  --max-total N            Total count cap (default: 10000; 0 = exact)\n"
@@ -64,6 +65,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--attrs")                  attrs = next();
         else if (arg == "--preload")                preload = 1;
         else if (arg == "-h" || arg == "--help")    { usage(argv[0]); return 0; }
+        else if (arg == "--version")                { std::printf("%s\n", flexicorp_pando_build_json()); return 0; }
         else {
             std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
             usage(argv[0]);

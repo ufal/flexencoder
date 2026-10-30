@@ -19,6 +19,15 @@ if(NOT TARGET pando_core)
     add_subdirectory("${PANDO_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/pando_build")
 endif()
 
+# ── Build identity (--version, flexicorp_pando_build_json): regenerated on every build ─
+set(FLEXICORP_PANDO_BUILD_INFO "${CMAKE_CURRENT_BINARY_DIR}/adapter_build_info.h")
+set(FLEXICORP_PANDO_BUILD_INFO_ARGS -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${FLEXICORP_PANDO_BUILD_INFO}
+    -DVERSION=${PROJECT_VERSION} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/adapter_build_info.cmake)
+execute_process(COMMAND ${CMAKE_COMMAND} ${FLEXICORP_PANDO_BUILD_INFO_ARGS})
+add_custom_target(flexicorp_pando_build_info
+    COMMAND ${CMAKE_COMMAND} ${FLEXICORP_PANDO_BUILD_INFO_ARGS}
+    BYPRODUCTS ${FLEXICORP_PANDO_BUILD_INFO})
+
 # ── Shared library: libflexicorp_pando.so ─────────────────────────────────
 # This is the primary build target — loaded by PHP via FFI.
 add_library(flexicorp_pando SHARED flexicorp_pando.cpp)
@@ -27,6 +36,8 @@ target_include_directories(flexicorp_pando
     PRIVATE ${PANDO_DIR}/src
 )
 target_link_libraries(flexicorp_pando PRIVATE pando_api pando_core)
+target_include_directories(flexicorp_pando PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_dependencies(flexicorp_pando flexicorp_pando_build_info)
 
 # Ensure symbols are exported for FFI.
 set_target_properties(flexicorp_pando PROPERTIES

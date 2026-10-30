@@ -90,7 +90,9 @@ inline std::string derive_project_root(const std::string& index_dir) {
 // region_ids.tbl are mapped, not loaded: what a lookup reads comes from the page
 // cache, which the OS can drop again. One index per xidx directory, kept while
 // its files are unchanged (a re-index is noticed by size / mtime / inode of
-// tokens.bin and regions.bin). Built in memory are only: the token order when
+// tokens.bin and regions.bin). Opening reads a sample of tokens.bin, not all of it: flexencoder writes it with
+// positions in order (IndexPosMap), so a sample in order is taken as a sorted file; a sample out of order (an
+// older writer) reads the whole file once. Built in memory are only: the token order when
 // tokens.bin is not sorted by position (4 bytes per token), per region type /
 // scope used the spans sorted by start (20 bytes per region), and the line
 // offsets of region_ids.tbl (8 bytes per line).
@@ -159,9 +161,9 @@ public:
     std::vector<std::string> docs;           // docs.tbl
     std::vector<std::string> region_types;   // region_types.tbl
 
-    bool empty() const { return valid_tokens_ == 0; }
+    bool empty() const { return !has_valid_; }
     /// flexencoder's old 1-based keys: no record for position 0.
-    bool legacy_one_based() const { return valid_tokens_ > 0 && !token(0); }
+    bool legacy_one_based() const { return has_valid_ && !token(0); }
 
     /// The record for corpus position `pos` (the last valid one in file order).
     std::optional<XidxTokenRec> token(int64_t pos) const {
@@ -246,7 +248,7 @@ public:
         if (!*usable) return false;
         int64_t best = -1;
         uint64_t best_w = std::numeric_limits<uint64_t>::max();
-        sr->spans.for_containing(pos, [&](uint32_t j, uint64_t w) {
+        sr->for_containing(pos, [&](uint32_t j, uint64_t w) {
             if (w < best_w || (w == best_w && static_cast<int64_t>(j) < best)) {
                 best_w = w;
                 best = j;
@@ -337,8 +339,34 @@ private:
 
     struct ScopeRng {
         pando::MmapFile rng, xidx;
-        SortedSpans spans;
+        SortedSpans spans;          // when the file is not sorted by start
         bool valid = false;
+        bool mapped = false;        // <scope>.rng sorted by start (as flexencoder writes it): read in place
+        size_t n = 0;
+        uint64_t max_width = 0;
+        int64_t start(size_t j) const { return i64le_ptr(static_cast<const unsigned char*>(rng.data()) + j * 16); }
+        int64_t end(size_t j) const { return i64le_ptr(static_cast<const unsigned char*>(rng.data()) + j * 16 + 8); }
+        /// f(entry, width) for each entry containing `pos`
+        template <class F>
+        void for_containing(int64_t pos, F&& f) const {
+            if (!mapped) {
+                spans.for_containing(pos, f);
+                return;
+            }
+            const int64_t from = pos < std::numeric_limits<int64_t>::min() + static_cast<int64_t>(max_width)
+                ? std::numeric_limits<int64_t>::min() : pos - static_cast<int64_t>(max_width);
+            size_t lo = 0, hi = n;   // the first entry starting at or after `from`
+            while (lo < hi) {
+                const size_t mid = lo + (hi - lo) / 2;
+                if (start(mid) < from) lo = mid + 1;
+                else hi = mid;
+            }
+            for (size_t k = lo; k < n && start(k) <= pos; ++k) {
+                const int64_t e = end(k);
+                if (e < pos) continue;
+                f(static_cast<uint32_t>(k), static_cast<uint64_t>(e - start(k)));
+            }
+        }
     };
 
     XidxIndex(const std::string& dir, FileId tid, FileId rid) : dir_(dir), tokens_id_(tid), regions_id_(rid) {
@@ -349,14 +377,27 @@ private:
         const size_t tsize = tokens_.size();
         tok_stride_ = (tsize > 0 && tsize % 40 == 0) ? 40 : 32;
         tok_n_ = tokens_.valid() ? tsize / tok_stride_ : 0;
-        bool sorted = true;
-        int64_t prev = std::numeric_limits<int64_t>::min();
-        for (size_t i = 0; i < tok_n_; ++i) {
+        // a valid record: the first ones of the file, as a rule
+        for (size_t i = 0; i < tok_n_ && !has_valid_; ++i) {
             const XidxTokenRec r = tok_rec(i);
-            if (r.corpus_pos < prev) sorted = false;
-            prev = r.corpus_pos;
-            if (r.corpus_pos >= 0 && r.xml_end >= r.xml_start) ++valid_tokens_;
+            has_valid_ = r.corpus_pos >= 0 && r.xml_end >= r.xml_start;
         }
+        // in order by position? A sample (the file's start and end, and records spread over it); out of order: the
+        // whole file
+        auto in_order = [&](size_t from, size_t to, size_t step) {
+            int64_t prev = std::numeric_limits<int64_t>::min();
+            for (size_t i = from; i < to; i += step) {
+                const int64_t p = tok_pos(i);
+                if (p < prev) return false;
+                prev = p;
+            }
+            return true;
+        };
+        constexpr size_t kEdge = 4096, kSpread = 1024;
+        bool sorted = in_order(0, std::min(tok_n_, kEdge), 1) &&
+                      in_order(tok_n_ > kEdge ? tok_n_ - kEdge : 0, tok_n_, 1) &&
+                      in_order(0, tok_n_, std::max<size_t>(1, tok_n_ / kSpread));
+        if (!sorted) sorted = in_order(0, tok_n_, 1);
         if (!sorted) {   // the order by position (stable: file order among equal positions)
             order_.resize(tok_n_);
             for (size_t i = 0; i < tok_n_; ++i) order_[i] = static_cast<uint32_t>(i);
@@ -441,17 +482,28 @@ private:
             if (sr->rng.valid() && sr->xidx.valid() && rs % 16 == 0 && xs % 8 == 0 && xs / 8 == n && n > 0
                 && regions_.valid() && reg_has_xml_) {
                 sr->valid = true;
-                const auto* rng = static_cast<const unsigned char*>(sr->rng.data());
                 const auto* xi = static_cast<const unsigned char*>(sr->xidx.data());
+                sr->n = n;
+                // one pass: the entries point into regions.bin, starts in order (then the file is read in place),
+                // the widest span
+                bool sorted = true;
+                int64_t prev = std::numeric_limits<int64_t>::min();
                 for (size_t j = 0; j < n; ++j) {
                     const uint64_t rec = static_cast<uint64_t>(i64le_ptr(xi + j * 8));
                     if (rec >= reg_n_) {   // as before: one entry past regions.bin disables the scope
                         sr->valid = false;
                         break;
                     }
-                    sr->spans.add(i64le_ptr(rng + j * 16), i64le_ptr(rng + j * 16 + 8), static_cast<uint32_t>(j));
+                    const int64_t a = sr->start(j), e = sr->end(j);
+                    if (a < prev) sorted = false;
+                    prev = a;
+                    if (e >= a) sr->max_width = std::max<uint64_t>(sr->max_width, static_cast<uint64_t>(e - a));
                 }
-                if (sr->valid) sr->spans.finish();
+                sr->mapped = sr->valid && sorted;
+                if (sr->valid && !sorted) {
+                    for (size_t j = 0; j < n; ++j) sr->spans.add(sr->start(j), sr->end(j), static_cast<uint32_t>(j));
+                    sr->spans.finish();
+                }
             }
         }
         scope_rng_[scope] = sr;
@@ -461,7 +513,8 @@ private:
     std::string dir_;
     FileId tokens_id_, regions_id_;
     pando::MmapFile tokens_, regions_, region_ids_;
-    size_t tok_stride_ = 32, tok_n_ = 0, valid_tokens_ = 0;
+    size_t tok_stride_ = 32, tok_n_ = 0;
+    bool has_valid_ = false;   // a record with a position and an XML span
     std::vector<uint32_t> order_;   // empty: tokens.bin is sorted by position
     size_t reg_stride_ = 40, reg_n_ = 0;
     bool reg_has_xml_ = false;

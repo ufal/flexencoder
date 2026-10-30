@@ -131,7 +131,8 @@ char* flexicorp_pando_request(
 const char* flexicorp_pando_build_string(void);
 
 // {"version", "build", "commit", "branch", "build_string", "adapter_api_version",
-//  "features": [...]} of the linked pando. Static; do not free.  (api_version 3)
+//  "adapter": {"version", "build", "commit"}, "features": [...]}: the linked pando, and the adapter's own build
+//  (its flexencoder commit). Static; do not free.  (api_version 3)
 const char* flexicorp_pando_build_json(void);
 
 // TEITOK XML around corpus spans, from the project's xidx (written by flexencoder next to

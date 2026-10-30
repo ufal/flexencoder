@@ -14,6 +14,7 @@
 #include "core/build_info.h"
 #include "core/json_utils.h"
 #include "flexicorp_json.h"
+#include "adapter_build_info.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -478,7 +479,9 @@ const char* flexicorp_pando_build_json(void) {
         for (size_t i = 0; i < feats.size(); ++i) f += std::string(i ? ", " : "") + "\"" + feats[i] + "\"";
         f += "]";
         return "{" + pando::build_json_fields() + ", \"build_string\": " + pando::jstr(pando::build_string())
-               + ", \"adapter_api_version\": 3, \"features\": " + f + "}";
+               + ", \"adapter_api_version\": 3, \"adapter\": {\"version\": " + pando::jstr(FLEXICORP_PANDO_VERSION)
+               + ", \"build\": " + pando::jstr(FLEXICORP_PANDO_DESCRIBE) + ", \"commit\": "
+               + pando::jstr(FLEXICORP_PANDO_COMMIT) + "}, \"features\": " + f + "}";
     }();
     return s.c_str();
 }
