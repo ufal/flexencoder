@@ -246,19 +246,16 @@ public:
         std::shared_ptr<const ScopeRng> sr = scope_rng(scope);
         *usable = sr && sr->valid;
         if (!*usable) return false;
-        int64_t best = -1;
-        uint64_t best_w = std::numeric_limits<uint64_t>::max();
-        sr->for_containing(pos, [&](uint32_t j, uint64_t w) {
-            if (w < best_w || (w == best_w && static_cast<int64_t>(j) < best)) {
-                best_w = w;
-                best = j;
-            }
-        });
+        const int64_t best = sr->narrowest(pos);
         if (best < 0) return false;
         const size_t j = static_cast<size_t>(best);
         const auto* rng = static_cast<const unsigned char*>(sr->rng.data());
         const auto* xi = static_cast<const unsigned char*>(sr->xidx.data());
         const size_t r = static_cast<size_t>(i64le_ptr(xi + j * 8));
+        if (r >= reg_n_) {   // an entry past regions.bin: the scope is not usable (as a damaged file)
+            *usable = false;
+            return false;
+        }
         out.start = i64le_ptr(rng + j * 16);
         out.end = i64le_ptr(rng + j * 16 + 8);
         out.doc_idx = reg_u32(r, 4);
@@ -343,29 +340,72 @@ private:
         bool valid = false;
         bool mapped = false;        // <scope>.rng sorted by start (as flexencoder writes it): read in place
         size_t n = 0;
-        uint64_t max_width = 0;
         int64_t start(size_t j) const { return i64le_ptr(static_cast<const unsigned char*>(rng.data()) + j * 16); }
         int64_t end(size_t j) const { return i64le_ptr(static_cast<const unsigned char*>(rng.data()) + j * 16 + 8); }
-        /// f(entry, width) for each entry containing `pos`
-        template <class F>
-        void for_containing(int64_t pos, F&& f) const {
+
+        /// The narrowest entry containing `pos` (the first of equal ones), -1 for none. In place: back from the
+        /// last entry starting at or before `pos`; once one contains it (width w), an entry starting before
+        /// pos - w is wider. A scan that finds none within kScan entries reads the widest span once and looks
+        /// in [pos - widest, pos] instead (exact either way).
+        int64_t narrowest(int64_t pos) const {
             if (!mapped) {
-                spans.for_containing(pos, f);
-                return;
+                int64_t best = -1;
+                uint64_t best_w = std::numeric_limits<uint64_t>::max();
+                spans.for_containing(pos, [&](uint32_t j, uint64_t w) {
+                    if (w < best_w || (w == best_w && static_cast<int64_t>(j) < best)) {
+                        best_w = w;
+                        best = j;
+                    }
+                });
+                return best;
             }
-            const int64_t from = pos < std::numeric_limits<int64_t>::min() + static_cast<int64_t>(max_width)
-                ? std::numeric_limits<int64_t>::min() : pos - static_cast<int64_t>(max_width);
-            size_t lo = 0, hi = n;   // the first entry starting at or after `from`
+            size_t lo = 0, hi = n;   // the first entry starting after `pos`
             while (lo < hi) {
                 const size_t mid = lo + (hi - lo) / 2;
-                if (start(mid) < from) lo = mid + 1;
+                if (start(mid) <= pos) lo = mid + 1;
                 else hi = mid;
             }
-            for (size_t k = lo; k < n && start(k) <= pos; ++k) {
+            constexpr size_t kScan = 4096;
+            int64_t best = -1;
+            uint64_t best_w = std::numeric_limits<uint64_t>::max();
+            size_t steps = 0;
+            for (size_t k = lo; k-- > 0;) {
+                const int64_t a = start(k);
+                if (best >= 0 && static_cast<uint64_t>(pos - a) > best_w) break;
+                if (best < 0 && ++steps > kScan) return narrowest_by_width(pos, lo);
                 const int64_t e = end(k);
-                if (e < pos) continue;
-                f(static_cast<uint32_t>(k), static_cast<uint64_t>(e - start(k)));
+                if (e < pos || e < a) continue;
+                const uint64_t w = static_cast<uint64_t>(e - a);
+                if (w <= best_w) {   // going back: an equal one has the smaller index
+                    best_w = w;
+                    best = static_cast<int64_t>(k);
+                }
             }
+            return best;
+        }
+
+    private:
+        mutable std::once_flag widest_once_;
+        mutable uint64_t widest_ = 0;
+        int64_t narrowest_by_width(int64_t pos, size_t upto) const {
+            std::call_once(widest_once_, [&] {
+                for (size_t j = 0; j < n; ++j)
+                    if (end(j) >= start(j)) widest_ = std::max<uint64_t>(widest_, static_cast<uint64_t>(end(j) - start(j)));
+            });
+            const int64_t from = pos < std::numeric_limits<int64_t>::min() + static_cast<int64_t>(widest_)
+                ? std::numeric_limits<int64_t>::min() : pos - static_cast<int64_t>(widest_);
+            int64_t best = -1;
+            uint64_t best_w = std::numeric_limits<uint64_t>::max();
+            for (size_t k = upto; k-- > 0 && start(k) >= from;) {
+                const int64_t a = start(k), e = end(k);
+                if (e < pos || e < a) continue;
+                const uint64_t w = static_cast<uint64_t>(e - a);
+                if (w <= best_w) {
+                    best_w = w;
+                    best = static_cast<int64_t>(k);
+                }
+            }
+            return best;
         }
     };
 
@@ -482,27 +522,30 @@ private:
             if (sr->rng.valid() && sr->xidx.valid() && rs % 16 == 0 && xs % 8 == 0 && xs / 8 == n && n > 0
                 && regions_.valid() && reg_has_xml_) {
                 sr->valid = true;
-                const auto* xi = static_cast<const unsigned char*>(sr->xidx.data());
                 sr->n = n;
-                // one pass: the entries point into regions.bin, starts in order (then the file is read in place),
-                // the widest span
-                bool sorted = true;
-                int64_t prev = std::numeric_limits<int64_t>::min();
-                for (size_t j = 0; j < n; ++j) {
-                    const uint64_t rec = static_cast<uint64_t>(i64le_ptr(xi + j * 8));
-                    if (rec >= reg_n_) {   // as before: one entry past regions.bin disables the scope
-                        sr->valid = false;
-                        break;
+                // in order by start? A sample (both ends, entries spread over the file): then read in place,
+                // the entries checked as a lookup reads them; out of order (an older writer): one pass, sorted copy
+                auto in_order = [&](size_t from, size_t to, size_t step) {
+                    int64_t prev = std::numeric_limits<int64_t>::min();
+                    for (size_t j = from; j < to; j += step) {
+                        if (sr->start(j) < prev) return false;
+                        prev = sr->start(j);
                     }
-                    const int64_t a = sr->start(j), e = sr->end(j);
-                    if (a < prev) sorted = false;
-                    prev = a;
-                    if (e >= a) sr->max_width = std::max<uint64_t>(sr->max_width, static_cast<uint64_t>(e - a));
-                }
-                sr->mapped = sr->valid && sorted;
-                if (sr->valid && !sorted) {
-                    for (size_t j = 0; j < n; ++j) sr->spans.add(sr->start(j), sr->end(j), static_cast<uint32_t>(j));
-                    sr->spans.finish();
+                    return true;
+                };
+                constexpr size_t kEdge = 4096, kSpread = 1024;
+                sr->mapped = in_order(0, std::min(n, kEdge), 1) && in_order(n > kEdge ? n - kEdge : 0, n, 1) &&
+                             in_order(0, n, std::max<size_t>(1, n / kSpread));
+                if (!sr->mapped) {
+                    const auto* xi = static_cast<const unsigned char*>(sr->xidx.data());
+                    for (size_t j = 0; j < n; ++j) {
+                        if (static_cast<uint64_t>(i64le_ptr(xi + j * 8)) >= reg_n_) {   // past regions.bin
+                            sr->valid = false;
+                            break;
+                        }
+                        sr->spans.add(sr->start(j), sr->end(j), static_cast<uint32_t>(j));
+                    }
+                    if (sr->valid) sr->spans.finish();
                 }
             }
         }
