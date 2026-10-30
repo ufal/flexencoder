@@ -23,7 +23,9 @@ static void usage(const char* prog) {
         "  --index-dir DIR          Explicit Pando index directory\n"
         "                           If DIR is the bare name \"pando\", CWD is the project root\n"
         "                           (expects ./xidx next to ./pando for XML fragments on hits).\n"
-        "  -q, --query QUERY        CQL query string (required)\n"
+        "  -q, --query QUERY        CQL query string (required, unless --request)\n"
+        "  --request PATH           One GET request as pando-server answers it, e.g. \"/context?pos=12&left=40\";\n"
+        "                           prints its JSON body (exit 1 on an HTTP error status)\n"
         "  --version                The build as JSON: the adapter's and the linked pando's version and commit\n"
         "  --offset N               Skip first N hits (default: 0)\n"
         "  --limit N                Max hits to return (default: 50)\n"
@@ -40,6 +42,7 @@ int main(int argc, char* argv[]) {
     std::string index_dir;
     std::string query;
     std::string attrs;
+    std::string request;
     int offset    = 0;
     int limit     = 50;
     int max_total = 10000;
@@ -63,6 +66,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--max-total")              max_total = std::atoi(next());
         else if (arg == "--context")                context = std::atoi(next());
         else if (arg == "--attrs")                  attrs = next();
+        else if (arg == "--request")                request = next();
         else if (arg == "--preload")                preload = 1;
         else if (arg == "-h" || arg == "--help")    { usage(argv[0]); return 0; }
         else if (arg == "--version")                { std::printf("%s\n", flexicorp_pando_build_json()); return 0; }
@@ -73,8 +77,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (query.empty()) {
-        std::fprintf(stderr, "Error: -q/--query is required\n");
+    if (query.empty() && request.empty()) {
+        std::fprintf(stderr, "Error: -q/--query or --request is required\n");
         usage(argv[0]);
         return 2;
     }
@@ -89,6 +93,19 @@ int main(int argc, char* argv[]) {
     if (!ctx) {
         std::fprintf(stderr, "%s\n", flexicorp_pando_last_error(nullptr));
         return 1;
+    }
+
+    if (!request.empty()) {
+        int status = 500;
+        char* body = flexicorp_pando_request(ctx, "GET", request.c_str(), nullptr, nullptr, &status);
+        if (body) {
+            std::fputs(body, stdout);
+            flexicorp_pando_free(body);
+        } else {
+            std::fprintf(stderr, "%s\n", flexicorp_pando_last_error(ctx));
+        }
+        flexicorp_pando_close(ctx);
+        return body && status < 400 ? 0 : 1;
     }
 
     char* json = flexicorp_pando_query(
