@@ -609,6 +609,25 @@ inline bool xidx_widen_standoff_region(const XidxIndex& xi, uint32_t doc, int64_
     return true;
 }
 
+/// The xidx folder of a corpus: <project_root>/xidx (flexencoder's default), else the one next to
+/// the index (<index>/../xidx), as when indexes are kept together in one place, apart from the
+/// TEITOK projects (whose XML stays where it is: docs.tbl paths are relative to the project root).
+inline std::string xidx_dir_for(const std::string& project_root, const std::string& index_dir) {
+    auto has_tokens = [](const std::string& d) { return static_cast<bool>(std::ifstream(d + "/tokens.bin", std::ios::binary)); };
+    std::string root = project_root;
+    while (!root.empty() && (root.back() == '/' || root.back() == '\\')) root.pop_back();
+    const std::string in_project = root + "/xidx";
+    if (has_tokens(in_project)) return in_project;
+    std::string idx = index_dir;
+    while (!idx.empty() && (idx.back() == '/' || idx.back() == '\\')) idx.pop_back();
+    const size_t slash = idx.find_last_of('/');
+    if (slash != std::string::npos) {
+        const std::string beside = idx.substr(0, slash) + "/xidx";
+        if (has_tokens(beside)) return beside;
+    }
+    return in_project;
+}
+
 inline bool xidx_lookup_fragment(
     const std::string& index_dir,
     const std::string& xidx_project_root_override,
@@ -627,7 +646,7 @@ inline bool xidx_lookup_fragment(
     while (!project_root.empty() && project_root.back() == '/') project_root.pop_back();
     if (project_root.empty()) project_root = derive_project_root(index_dir);
     if (project_root.empty()) return false;
-    const std::string xidx_dir = project_root + "/xidx";
+    const std::string xidx_dir = xidx_dir_for(project_root, index_dir);
 
     // the xidx files, mapped (shared by every lookup of this corpus; no lock held here)
     const std::shared_ptr<const XidxIndex> xi = XidxIndex::get(xidx_dir);
@@ -983,7 +1002,7 @@ struct PandoFragmentEmitPolicy {
     bool use_kwic_token_xml_span{false};
 };
 
-inline bool xidx_has_sentence_or_utterance_scopes(const std::string& project_root) {
+inline bool xidx_has_sentence_or_utterance_scopes(const std::string& project_root, const std::string& index_dir = "") {
     std::string root = project_root;
     while (!root.empty() && (root.back() == '/' || root.back() == '\\')) {
         root.pop_back();
@@ -991,7 +1010,7 @@ inline bool xidx_has_sentence_or_utterance_scopes(const std::string& project_roo
     if (root.empty()) {
         return true;
     }
-    const std::string xidx = root + "/xidx";
+    const std::string xidx = xidx_dir_for(root, index_dir);
     auto pair_ok = [&xidx](const char* name) -> bool {
         std::ifstream a(xidx + "/" + name + ".rng", std::ios::binary);
         std::ifstream b(xidx + "/" + name + "_xidx.rng", std::ios::binary);
@@ -1004,7 +1023,8 @@ inline PandoFragmentEmitPolicy resolve_pando_fragment_emit_policy(
     std::string context_scope,
     const std::string& project_root,
     std::string fragment_scope_override,
-    bool extract_fragments_requested
+    bool extract_fragments_requested,
+    const std::string& index_dir = ""
 ) {
     auto trim = [](std::string s) -> std::string {
         while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) {
@@ -1038,7 +1058,7 @@ inline PandoFragmentEmitPolicy resolve_pando_fragment_emit_policy(
         pol.include_xidx_fragment = extract_fragments_requested;
         return pol;
     }
-    if (extract_fragments_requested && !xidx_has_sentence_or_utterance_scopes(project_root)) {
+    if (extract_fragments_requested && !xidx_has_sentence_or_utterance_scopes(project_root, index_dir)) {
         pol.include_xidx_fragment = true;
         pol.kwic_only_no_sentence_regions = true;
         pol.use_kwic_token_xml_span = true;

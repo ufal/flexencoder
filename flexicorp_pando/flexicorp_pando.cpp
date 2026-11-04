@@ -234,7 +234,7 @@ char* flexicorp_pando_query(
         fragment_env = fe;
     }
     flexicorp_pando::PandoFragmentEmitPolicy frag_emit = flexicorp_pando::resolve_pando_fragment_emit_policy(
-        context_scope, ctx->xidx_project_root, fragment_env, true);
+        context_scope, ctx->xidx_project_root, fragment_env, true, ctx->index_dir);
 
     try {
         const std::string qstr(query);
@@ -454,7 +454,7 @@ char* flexicorp_pando_xidx_fragments(
             : !ctx->xidx_project_root.empty() ? ctx->xidx_project_root
             : flexicorp_pando::derive_project_root(ctx->index_dir);
         const flexicorp_pando::PandoFragmentEmitPolicy pol = flexicorp_pando::resolve_pando_fragment_emit_policy(
-            context_scope ? std::string(context_scope) : std::string(), project_root, fragment_env, true);
+            context_scope ? std::string(context_scope) : std::string(), project_root, fragment_env, true, ctx->index_dir);
         const int64_t csize = static_cast<int64_t>(ctx->corpus.size());
         const int kw = std::max(0, context);
         std::string out = "{\"ok\": true, \"fragments\": [";
