@@ -13,9 +13,11 @@ if [[ ! -x "$FLEXENCODER" ]]; then
   exit 1
 fi
 
-ROOT="$SCRIPT_DIR/testdata/entities"
+# a copy: flexencoder also writes xidx/ into the project folder
+ROOT="$(mktemp -d)"
 OUT="$(mktemp -d)"
-trap 'rm -rf "$OUT"' EXIT
+trap 'rm -rf "$OUT" "$ROOT"' EXIT
+cp -R "$SCRIPT_DIR/testdata/entities/." "$ROOT/"
 
 "$FLEXENCODER" \
   --project-root "$ROOT" \

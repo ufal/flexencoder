@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI><teiHeader><title>Edge cases</title></teiHeader>
+<text>
+<s id="s-1"><tok id="w-1">AT&amp;T</tok> <tok id='w-2' lemma='it&apos;s'>it&apos;s</tok>
+<tok id="w-3"
+     lemma="multi line">split</tok><!-- not a token: </tok> --><tok id="w-4"/><tok id="w-5">a<dtok id="d-1" form="a"/>b</tok></s>
+<s id="s-2"><tok id="w-6"><![CDATA[x</tok>y]]></tok> <tok id="w-7">čeština 日本</tok><tok id="w-8">&#x1F600;</tok></s>
+</text></TEI>

@@ -1,6 +1,8 @@
 // flexencoder_extractor.cpp - TEITOK XML reader / extractor (token + region events)
 
 #include <algorithm>
+#include <cctype>
+#include <iterator>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -82,6 +84,67 @@ std::string xml_unescape(const std::string& in) {
         i = semi;
     }
     return out;
+}
+
+// The end (exclusive) of the element that starts at `start` in the file's own bytes, or 0 when it
+// can't be placed: the xidx end of a token or region, so that [start, end) is that element exactly
+// (re-serializing it with pugixml escapes the text again and changes quotes, spaces and empty
+// elements). Follows start and end tags of the same name; skips quoted attribute values,
+// comments, CDATA and processing instructions.
+std::uint64_t xml_element_end(const std::string& buf, std::uint64_t start) {
+    const std::size_t n = buf.size();
+    if (start >= n || buf[start] != '<') return 0;
+    auto name_at = [&](std::size_t i) {
+        std::size_t j = i;
+        while (j < n && !std::isspace(static_cast<unsigned char>(buf[j])) && buf[j] != '>' && buf[j] != '/') ++j;
+        return buf.substr(i, j - i);
+    };
+    // the end of a tag opened at i ('<'), quotes respected: the index of its '>', npos when none
+    auto tag_close = [&](std::size_t i) -> std::size_t {
+        char q = 0;
+        for (std::size_t j = i + 1; j < n; ++j) {
+            const char c = buf[j];
+            if (q) { if (c == q) q = 0; }
+            else if (c == '"' || c == '\'') q = c;
+            else if (c == '>') return j;
+        }
+        return std::string::npos;
+    };
+    const std::string name = name_at(start + 1);
+    if (name.empty()) return 0;
+    std::size_t gt = tag_close(start);
+    if (gt == std::string::npos) return 0;
+    if (buf[gt - 1] == '/') return gt + 1;   // <tok … />
+    int depth = 1;
+    std::size_t i = gt + 1;
+    while (i < n) {
+        const std::size_t lt = buf.find('<', i);
+        if (lt == std::string::npos) return 0;
+        if (buf.compare(lt, 4, "<!--") == 0) {
+            const std::size_t e = buf.find("-->", lt + 4);
+            if (e == std::string::npos) return 0;
+            i = e + 3;
+        } else if (buf.compare(lt, 9, "<![CDATA[") == 0) {
+            const std::size_t e = buf.find("]]>", lt + 9);
+            if (e == std::string::npos) return 0;
+            i = e + 3;
+        } else if (buf.compare(lt, 2, "<?") == 0 || buf.compare(lt, 2, "<!") == 0) {
+            const std::size_t e = buf.find('>', lt + 2);
+            if (e == std::string::npos) return 0;
+            i = e + 1;
+        } else if (buf.compare(lt, 2, "</") == 0) {
+            const std::size_t e = buf.find('>', lt + 2);
+            if (e == std::string::npos) return 0;
+            if (name_at(lt + 2) == name && --depth == 0) return e + 1;
+            i = e + 1;
+        } else {
+            const std::size_t e = tag_close(lt);
+            if (e == std::string::npos) return 0;
+            if (buf[e - 1] != '/' && name_at(lt + 1) == name) ++depth;
+            i = e + 1;
+        }
+    }
+    return 0;
 }
 
 std::string ascii_lower(std::string s) {
@@ -1205,6 +1268,20 @@ void FlexExtractor::treat_file(
                   << ": " << res.description() << std::endl;
         return;
     }
+    // the file's own bytes: xidx ends are found there (xml_element_end), not by re-serializing
+    std::string src_bytes;
+    {
+        std::ifstream in(path, std::ios::binary);
+        src_bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    // the end of `node`'s element when it starts at `xml_start`: from the bytes, else (not placed)
+    // its serialized length as before, without escaping its text again
+    auto element_end = [&](const pugi::xml_node& node, std::uint64_t xml_start) -> std::uint64_t {
+        if (const std::uint64_t e = xml_element_end(src_bytes, xml_start)) return e;
+        std::ostringstream oss;
+        node.print(oss, "", pugi::format_raw | pugi::format_no_escapes);
+        return xml_start + oss.str().size();
+    };
 
     if (!cqp_restriction_xpath_.empty()) {
         try {
@@ -1363,9 +1440,7 @@ void FlexExtractor::treat_file(
         int off = node.offset_debug();
         if (off < 1) off = 1;
         std::uint64_t xml_start = static_cast<std::uint64_t>(off - 1);
-        std::ostringstream oss;
-        node.print(oss);
-        std::uint64_t xml_end = xml_start + oss.str().size();
+        std::uint64_t xml_end = element_end(node, xml_start);
         FlexToken tok;
         tok.doc_id = doc_id;
         tok.tok_id = tokid;
@@ -1584,9 +1659,7 @@ void FlexExtractor::treat_file(
                 }
                 int off = el.offset_debug();
                 if (off > 0) reg.xml_start = static_cast<std::uint64_t>(off - 1);
-                std::ostringstream oss;
-                el.print(oss, "", pugi::format_raw);
-                if (reg.xml_start && oss.str().size()) reg.xml_end = reg.xml_start + oss.str().size();
+                if (reg.xml_start) reg.xml_end = element_end(el, reg.xml_start);
                 for (auto& w : writers) { if (w) w->add_region(reg); }
             }
             continue;
@@ -1708,11 +1781,7 @@ void FlexExtractor::treat_file(
                 int no = next.offset_debug();
                 if (no > 0) xml_end = static_cast<std::uint64_t>(no - 1);
             }
-            if (xml_end <= xml_start && off > 0) {
-                std::ostringstream oss;
-                el.print(oss, "", pugi::format_raw);
-                xml_end = xml_start + oss.str().size();
-            }
+            if (xml_end <= xml_start && off > 0) xml_end = element_end(el, xml_start);
 
             FlexRegion reg;
             reg.doc_id = doc_id;
