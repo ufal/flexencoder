@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ttsettings>
+  <cqp>
+    <pattributes>
+      <item key="form"/>
+      <item key="word"/>
+      <item key="lemma"/>
+      <item key="id"/>
+    </pattributes>
+    <sattributes>
+      <item key="text" level="text">
+        <item key="title" xpath="//teiHeader//title"/>
+        <item key="note" xpath="//teiHeader//note" xml="raw"/>
+      </item>
+      <item key="s" level="s"/>
+    </sattributes>
+  </cqp>
+</ttsettings>

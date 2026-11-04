@@ -46,6 +46,44 @@ bool parse_truthy(const char* v) {
     return s == "1" || s == "true" || s == "yes" || s == "y" || s == "on";
 }
 
+// XML text as the index stores it: entity and character references decoded (&amp; &lt; &gt; &quot;
+// &apos; &#N; &#xH;), unknown ones left as they are. The XML is read with escapes left in place
+// (parse_ws_pcdata alone), so that xidx offsets match the file byte for byte; a value goes into the
+// index decoded, once: `AT&amp;T` is searched and shown as `AT&T`.
+std::string xml_unescape(const std::string& in) {
+    if (in.find('&') == std::string::npos) return in;
+    std::string out;
+    out.reserve(in.size());
+    for (std::string::size_type i = 0; i < in.size(); ++i) {
+        if (in[i] != '&') { out += in[i]; continue; }
+        const std::string::size_type semi = in.find(';', i + 1);
+        if (semi == std::string::npos || semi - i > 12) { out += in[i]; continue; }
+        const std::string ent = in.substr(i + 1, semi - i - 1);
+        unsigned long cp = 0;
+        bool num = false;
+        if (ent.size() > 1 && ent[0] == '#') {
+            const bool hex = ent[1] == 'x' || ent[1] == 'X';
+            const std::string digits = ent.substr(hex ? 2 : 1);
+            num = !digits.empty() && digits.find_first_not_of(hex ? "0123456789abcdefABCDEF" : "0123456789") == std::string::npos;
+            if (num) cp = std::stoul(digits, nullptr, hex ? 16 : 10);
+            if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) num = false;
+        }
+        if (num) {
+            if (cp < 0x80) out += static_cast<char>(cp);
+            else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+            else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+        } else if (ent == "amp") out += '&';
+        else if (ent == "lt") out += '<';
+        else if (ent == "gt") out += '>';
+        else if (ent == "quot") out += '"';
+        else if (ent == "apos") out += '\'';
+        else { out += in.substr(i, semi - i + 1); }
+        i = semi;
+    }
+    return out;
+}
+
 std::string ascii_lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
@@ -944,13 +982,15 @@ bool FlexExtractor::form_is_deleted(const pugi::xml_node& node, const std::strin
 static std::string sattr_xml_fragment_value(const pugi::xpath_node& xresi, const std::string& xml_mode) {
     if (xresi.attribute()) return std::string(xresi.attribute().value());
     if (!xresi.node()) return "";
+    // the text still has its escapes (parse flags): print it as it is, not escaped again
+    const unsigned fmt = pugi::format_default | pugi::format_no_escapes;
     if (xml_mode == "raw") {
         std::ostringstream oss;
-        xresi.node().print(oss);
+        xresi.node().print(oss, PUGIXML_TEXT("\t"), fmt);
         return oss.str();
     }
     std::ostringstream oss;
-    xresi.node().print(oss);
+    xresi.node().print(oss, PUGIXML_TEXT("\t"), fmt);
     std::string formival = oss.str();
     formival = preg_replace(formival, "<[^>]+>", "");
     if (xml_mode == "normalize") {
@@ -1038,7 +1078,7 @@ std::string FlexExtractor::eval_sattr_item(
             if (ext_path_str.size() > 4 && ext_path_str.substr(ext_path_str.size() - 4) == ".xml") {
                 if (externals.find(ext_path_str) == externals.end()) {
                     externals[ext_path_str] = std::make_unique<pugi::xml_document>();
-                    if (!externals[ext_path_str]->load_file(ext_path_str.c_str())) {
+                    if (!externals[ext_path_str]->load_file(ext_path_str.c_str(), pugi::parse_default & ~pugi::parse_escapes)) {
                         externals.erase(ext_path_str);
                     }
                 }
@@ -1111,7 +1151,7 @@ std::string FlexExtractor::eval_sattr_item(
         if (ext_path_str.size() > 4 && ext_path_str.substr(ext_path_str.size() - 4) == ".xml") {
             if (externals.find(ext_path_str) == externals.end()) {
                 externals[ext_path_str] = std::make_unique<pugi::xml_document>();
-                if (!externals[ext_path_str]->load_file(ext_path_str.c_str())) {
+                if (!externals[ext_path_str]->load_file(ext_path_str.c_str(), pugi::parse_default & ~pugi::parse_escapes)) {
                     externals.erase(ext_path_str);
                 }
             }
@@ -1354,10 +1394,10 @@ void FlexExtractor::treat_file(
                 formval = calc_form(node, fld);
             }
             formval = trim(replace_all(formval, "\n", " "));
-            formval = normalize_conllu_placeholder(cfg_, pa.key, formval);
+            formval = normalize_conllu_placeholder(cfg_, pa.key, xml_unescape(formval));
             tok.attrs[pa.key] = formval;
         }
-        tok.attrs["inner_text"] = normalize_tok_inner_text(node);
+        tok.attrs["inner_text"] = xml_unescape(normalize_tok_inner_text(node));
         id_pos[tokid] = tok.global_pos;
         if (first_token_pos == 0) first_token_pos = tok.global_pos;
         last_token_pos = tok.global_pos;
@@ -1446,6 +1486,7 @@ void FlexExtractor::treat_file(
             if (sa.level != "text") continue;
             for (const auto& ap : sa.attrs) {
                 std::string val = eval_sattr_item(doc, doc_context, ap, *externals, project_root, true);
+                if (ap.xml_mode != "raw") val = xml_unescape(val);   // raw: XML, kept as XML
                 if (!val.empty()) text_reg.attrs[ap.key] = val;
             }
             break; // one text-level block
@@ -1539,7 +1580,7 @@ void FlexExtractor::treat_file(
                 for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att) {
                     const std::string aname = att->name();
                     if (aname == sa.corpid_attr_) continue;
-                    reg.attrs[att->name()] = att->value();
+                    reg.attrs[att->name()] = xml_unescape(att->value());
                 }
                 int off = el.offset_debug();
                 if (off > 0) reg.xml_start = static_cast<std::uint64_t>(off - 1);
@@ -1700,6 +1741,7 @@ void FlexExtractor::treat_file(
 
             for (const auto& ap : sa.attrs) {
                 std::string val = eval_sattr_item(doc, el, ap, *externals, project_root, false);
+                if (ap.xml_mode != "raw") val = xml_unescape(val);   // raw: XML, kept as XML
                 if (!val.empty()) reg.attrs[ap.key] = val;
             }
 
@@ -1784,7 +1826,7 @@ void FlexExtractor::treat_file(
             reg.xml_start = 0;
             reg.xml_end = 0;
             for (auto att = span.attributes_begin(); att != span.attributes_end(); ++att) {
-                reg.attrs[att->name()] = att->value();
+                reg.attrs[att->name()] = xml_unescape(att->value());
             }
             for (auto& w : writers) { if (w) w->add_region(reg); }
         }

@@ -1,0 +1,2 @@
+<TEI><teiHeader><title>Q&amp;A &#x2013; &lt;test&gt;</title><note>a <b>bold</b> &amp; plain</note></teiHeader>
+<text><s id="s-1" type="q&amp;a"><tok id="w-1">AT&amp;T</tok> <tok id="w-2" lemma="&quot;">&quot;</tok> <tok id="w-3" form="caf&#233;">cafe</tok> <tok id="w-4">&lt;3</tok></s></text></TEI>
