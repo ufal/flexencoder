@@ -397,6 +397,19 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    // other indexes made with the xidx this run replaces (a CWB-only run next to a Pando index, a second
+    // Pando index of the same corpus) no longer match it: say so before it is rewritten
+    if (conllu_inputs.empty()) {
+        const fs::path xdir = !output_xidx.empty() ? fs::path(output_xidx)
+                                                   : fs::path(cfg.project_root.empty() ? "." : cfg.project_root) / "xidx";
+        for (const auto& dir : flexencoder::indexes_left_behind(xdir, cfg.project_root.empty() ? "." : cfg.project_root,
+                                                                {output_pando, pando_stream_index_dir})) {
+            std::cerr << "[flexencoder] Warning: this run rewrites the xidx " << xdir.string()
+                      << " but not the Pando index " << dir
+                      << ", which was built with it: that index's hits will show without XML fragments until it is"
+                         " reindexed as well\n";
+        }
+    }
     std::vector<std::unique_ptr<IFlexBackendWriter>> writers;
     // Always build backend-agnostic xidx so all backends can resolve corpus
     // positions to TEITOK XML fragments without relying on CWB-specific xidx files

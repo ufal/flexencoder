@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One flexencoder run writes the same build id into the xidx (build.id) and the Pando index (corpus.info
-# build_id=); --build-id sets it; a malformed one is refused. With FLEXICORP_PANDO set (the adapter's
+# build_id=); --build-id sets it; a malformed one is refused; a run that rewrites the xidx without the index
+# built with it warns. With FLEXICORP_PANDO set (the adapter's
 # CLI), also: hits get XML fragments when the ids match, and none when the xidx is from another run.
 set -euo pipefail
 
@@ -29,6 +30,15 @@ run --build-id test-1 || fail "run with --build-id"
 [[ "$(grep -c '^build_id=' "$ROOT/pando/corpus.info")" == 1 ]] || fail "corpus.info has not one build_id line"
 
 if run --build-id 'bad id'; then fail "a build id with a space was accepted"; fi
+
+# a run that rewrites the xidx but not the Pando index built with it says so; a full run does not
+run --build-id test-2 || fail "full run"
+grep -q "Warning: this run rewrites the xidx" "$OUT/log" && fail "warning on a full run"
+"$FLEXENCODER" --project-root "$ROOT" --settings "$ROOT/cqpsettings.xml" --searchfolder xmlfiles \
+  --output "$ROOT/cqp" >"$OUT/log" 2>&1 || fail "CWB-only run"
+grep -q "Warning: this run rewrites the xidx .* but not the Pando index $ROOT/pando" "$OUT/log" \
+  || fail "no warning for the Pando index left behind"
+run --build-id test-1 || fail "full run"
 
 if [[ -n "${FLEXICORP_PANDO:-}" ]]; then
   frags() { "$FLEXICORP_PANDO" -p "$ROOT" -q '[]' --limit 3 2>/dev/null \
