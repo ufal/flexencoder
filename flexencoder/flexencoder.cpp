@@ -1,5 +1,6 @@
 // flexencoder.cpp - Main entry point and default writers (e.g. StatsWriter)
 
+#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <fstream>
@@ -24,6 +25,7 @@
 #include "flexencoder_clickhouse.hpp"
 #include "flexencoder_pando.hpp"
 #include "flexencoder_xidx.hpp"
+#include "flexencoder_build_id.hpp"
 #include "flexencoder_vrt.hpp"
 #ifdef USE_PANDO_API
 #include "flexencoder_pando_api.hpp"
@@ -128,7 +130,7 @@ static void print_usage(const char* argv0) {
         << " [--output-pando DIR]"
         << " [--output-xidx DIR]"
         << " [--output-vrt PATH] [--output-pando-events PATH]"
-        << " [--settings PATH] [--log PATH] [--all]\n"
+        << " [--settings PATH] [--log PATH] [--build-id ID] [--all]\n"
         << "  If --project-root is omitted, the current working directory is used (run from your TEITOK project folder).\n"
         << "  --output DIR   Write CWB + xidx files to DIR (omit to skip CWB)\n"
         << "  --output-clickhouse DIR   Also write ClickHouse JSONL "
@@ -150,6 +152,8 @@ static void print_usage(const char* argv0) {
         << "  --settings PATH  Use this settings XML "
         << "(default: project_root/tmp/cqpsettings.xml or Resources/settings.xml)\n"
         << "  --log PATH      Append completion line (UTC time, document/token counts) when encoding finishes\n"
+        << "  --build-id ID   The id written into the xidx (build.id) and the Pando index (corpus.info build_id=);\n"
+        << "                  readers cut XML fragments only when the two match (default: a new id per run)\n"
         << "  --searchfolder   Comma-separated paths under project root (default: cqp/@folder or @searchfolder in settings, else xmlfiles)\n"
         << "  --all           Defaults: CWB -> project_root/cqp; Pando: stream to pando-index on PATH -> project_root/pando,\n"
         << "                  else JSONL backup -> project_root/pando-events.jsonl (or use --output-pando-events PATH).\n"
@@ -190,6 +194,8 @@ int main(int argc, char** argv) {
             cfg.searchfolder_from_cli = true;
         } else if (arg == "--log" && i + 1 < argc) {
             cfg.log_path = argv[++i];
+        } else if (arg == "--build-id" && i + 1 < argc) {
+            cfg.build_id = argv[++i];
         } else if (arg == "--settings" && i + 1 < argc) {
             cfg.settings_path = argv[++i];
         } else if ((arg == "--output" || arg == "-o") && i + 1 < argc) {
@@ -384,6 +390,13 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (cfg.build_id.empty()) cfg.build_id = flexencoder::new_build_id();
+    for (unsigned char c : cfg.build_id) {
+        if (!std::isalnum(c) && c != '-' && c != '_' && c != '.' && c != ':') {
+            std::cerr << "[flexencoder] --build-id: only letters, digits and - _ . : are allowed\n";
+            return 2;
+        }
+    }
     std::vector<std::unique_ptr<IFlexBackendWriter>> writers;
     // Always build backend-agnostic xidx so all backends can resolve corpus
     // positions to TEITOK XML fragments without relying on CWB-specific xidx files

@@ -16,6 +16,7 @@
 
 #ifdef USE_PANDO_API
 #include "flexencoder_helpers.hpp"  // trim, etc.
+#include "flexencoder_build_id.hpp"
 
 static std::string normalize_multivalue_with_sep(const std::string& v, const std::string& sep) {
     if (v.empty() || sep.empty() || sep == "|") return v;
@@ -323,6 +324,10 @@ void PandoApiWriter::end_corpus() {
         // finalize() has already flushed index files; release ownership to
         // avoid running the problematic destructor path at process shutdown.
         (void)builder_.release();
+        // the run's id, so the xidx of the same run is known to belong to this index (flexencoder_build_id.hpp)
+        if (!flexencoder::stamp_index_build_id(output_dir_, cfg_snapshot_.build_id)) {
+            std::cerr << "[flexencoder] Pando: could not write build_id into " << output_dir_ << "/corpus.info\n";
+        }
     }
     std::cout << "[flexencoder] Pando index written to " << output_dir_ << std::endl;
 #endif

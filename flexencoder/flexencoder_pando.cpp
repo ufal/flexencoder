@@ -1,6 +1,7 @@
 // flexencoder_pando.cpp - Pando JSONL events writer implementation
 
 #include "flexencoder_pando.hpp"
+#include "flexencoder_build_id.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -677,6 +678,10 @@ void PandoEventsWriter::end_corpus() {
     if (was_streaming && failure_.empty() && !fs::exists(fs::path(index_output_dir_) / "corpus.info")) {
         failure_ = "pando-index finished but " + index_output_dir_ + "/corpus.info is missing";
         std::cerr << "[flexencoder] " << failure_ << "\n";
+    }
+    // the run's id, so the xidx of the same run is known to belong to this index (flexencoder_build_id.hpp)
+    if (was_streaming && failure_.empty() && !flexencoder::stamp_index_build_id(index_output_dir_, cfg_snapshot_.build_id)) {
+        std::cerr << "[flexencoder] Pando: could not write build_id into " << index_output_dir_ << "/corpus.info\n";
     }
 }
 

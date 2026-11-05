@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -628,6 +629,67 @@ inline std::string xidx_dir_for(const std::string& project_root, const std::stri
     return in_project;
 }
 
+/// flexencoder's run id (flexencoder_build_id.hpp) of an xidx (`build.id`) or of a Pando index (`build_id=` in
+/// corpus.info; a published root's is in current/), "" when not recorded (built before it was, or not by flexencoder).
+inline std::string xidx_read_build_id(const std::string& xidx_dir) {
+    std::ifstream in(xidx_dir + "/build.id", std::ios::binary);
+    std::string line;
+    if (!in || !std::getline(in, line)) return {};
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    return line;
+}
+
+inline std::string index_read_build_id(const std::string& index_dir) {
+    for (const char* sub : {"/corpus.info", "/current/corpus.info"}) {
+        std::ifstream in(index_dir + sub, std::ios::binary);
+        if (!in) continue;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.rfind("build_id=", 0) != 0) continue;
+            line = line.substr(9);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            return line;
+        }
+        return {};
+    }
+    return {};
+}
+
+/// Does the xidx belong to the index: from the same flexencoder run? Only then are its byte offsets
+/// those of the positions the index gives. Not checked when neither records a run (older builds). An
+/// xidx rewritten by a reindex whose index was not swapped in (or the other way round) does not match:
+/// its hits then get no XML from it. Rechecked at most once a second per pair; a mismatch is logged once.
+inline bool xidx_matches_index(const std::string& xidx_dir, const std::string& index_dir) {
+    struct Entry {
+        bool ok;
+        std::chrono::steady_clock::time_point checked;
+        bool logged;
+    };
+    static std::mutex mu;
+    static std::unordered_map<std::string, Entry> cache;
+    const std::string key = xidx_dir + '\n' + index_dir;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(key);
+        if (it != cache.end() && now - it->second.checked < std::chrono::seconds(1)) return it->second.ok;
+    }
+    const std::string xid = xidx_read_build_id(xidx_dir);
+    const std::string iid = index_dir.empty() ? std::string() : index_read_build_id(index_dir);
+    const bool ok = index_dir.empty() || (xid.empty() && iid.empty()) || xid == iid;
+    std::lock_guard<std::mutex> lk(mu);
+    Entry& e = cache[key];
+    if (!ok && !e.logged) {
+        std::cerr << "[flexicorp-pando] " << xidx_dir << " (build " << (xid.empty() ? "not recorded" : xid)
+                  << ") does not belong to the index " << index_dir << " (build " << (iid.empty() ? "not recorded" : iid)
+                  << "): hits get no XML fragments from it until the corpus is reindexed\n";
+    }
+    e.logged = e.logged || !ok;
+    e.ok = ok;
+    e.checked = now;
+    return ok;
+}
+
 inline bool xidx_lookup_fragment(
     const std::string& index_dir,
     const std::string& xidx_project_root_override,
@@ -647,6 +709,7 @@ inline bool xidx_lookup_fragment(
     if (project_root.empty()) project_root = derive_project_root(index_dir);
     if (project_root.empty()) return false;
     const std::string xidx_dir = xidx_dir_for(project_root, index_dir);
+    if (!xidx_matches_index(xidx_dir, index_dir)) return false;
 
     // the xidx files, mapped (shared by every lookup of this corpus; no lock held here)
     const std::shared_ptr<const XidxIndex> xi = XidxIndex::get(xidx_dir);

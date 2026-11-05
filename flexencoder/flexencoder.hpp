@@ -104,6 +104,8 @@ struct FlexConfig {
 
     /** If non-empty, append a completion summary (timestamps, counts) when encoding finishes. */
     std::string log_path;
+    /** One id for this run, written into the xidx and the Pando index (flexencoder_build_id.hpp). */
+    std::string build_id;
 
     /** Optional: CWB registry corpus id (e.g. flexdecoder sets from registry ID line). */
     std::string corpus_id;

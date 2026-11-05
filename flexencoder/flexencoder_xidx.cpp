@@ -1,6 +1,7 @@
 // flexencoder_xidx.cpp - Backend-agnostic xidx writer implementation
 
 #include "flexencoder_xidx.hpp"
+#include "flexencoder_build_id.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -60,6 +61,9 @@ void XidxWriter::begin_corpus(const FlexConfig& cfg) {
         xidx_dir_ = root / "xidx";
     }
     fs::create_directories(xidx_dir_);
+    // the old id goes first: while the files are being rewritten they belong to no index
+    std::error_code ec;
+    fs::remove(xidx_dir_ / "build.id", ec);
 
     tokens_bin_.open(xidx_dir_ / "tokens.bin", std::ios::binary | std::ios::trunc);
     regions_bin_.open(xidx_dir_ / "regions.bin", std::ios::binary | std::ios::trunc);
@@ -250,6 +254,11 @@ void XidxWriter::end_corpus() {
 
     per_type_entries_.clear();
     regions_rec_count_ = 0;
+
+    // written last: the xidx is complete, and belongs to the index of the same run (flexencoder_build_id.hpp)
+    if (!cfg_.build_id.empty() && !flexencoder::write_file_atomic(xidx_dir_ / "build.id", cfg_.build_id + "\n")) {
+        std::cerr << "[flexencoder] XidxWriter: could not write " << (xidx_dir_ / "build.id").string() << std::endl;
+    }
 
     std::cout << "[flexencoder] xidx written under " << xidx_dir_.string() << std::endl;
 }
