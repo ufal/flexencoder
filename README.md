@@ -31,3 +31,9 @@ In a TEITOK installation, the stack installer (`install-stack.pl` in the flexico
 builds and installs both.
 
 Split out of the flexicorp repository on 2026-10-07 (history preserved).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). The bundled pugixml keeps its own MIT licence.
+
+If you use flexencoder in research, please cite it: [`CITATION.cff`](CITATION.cff) has the reference (GitHub shows it as "Cite this repository").
