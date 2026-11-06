@@ -11,6 +11,7 @@
 #include "corpus/corpus.h"
 #include "api/query_json.h"
 #include "api/server_api.h"
+#include "query/dialect/dialect.h"
 #include "core/build_info.h"
 #include "core/json_utils.h"
 #include "flexicorp_json.h"
@@ -99,7 +100,7 @@ static std::vector<std::string> parse_attrs(const char* attrs) {
 extern "C" {
 
 int flexicorp_pando_api_version(void) {
-    return 5;
+    return 6;
 }
 
 static flexicorp_pando_ctx_t* open_ctx(const char* project_root, const char* index_dir,
@@ -209,10 +210,32 @@ char* flexicorp_pando_query(
     int context,
     const char* attrs
 ) {
+    return flexicorp_pando_query_in(ctx, query, nullptr, offset, limit, max_total, context, attrs);
+}
+
+char* flexicorp_pando_query_in(
+    flexicorp_pando_ctx_t* ctx,
+    const char* query,
+    const char* language,
+    int offset,
+    int limit,
+    int max_total,
+    int context,
+    const char* attrs
+) {
     if (!ctx) return error_json("null context handle");
     if (!query || !*query) return error_json("empty query");
 
     ctx->set_error("");
+
+    // the query's language, as pando's dialect ("" = pando CQL); no prefix in the query text: the
+    // language is named here (FQS takes a prefix off before it reaches pando)
+    std::string dialect;
+    if (language && *language) {
+        dialect = pando::normalize_dialect(language);
+        if (dialect.empty()) return error_json(std::string("unknown query language: ") + language);
+        if (dialect == "native") dialect.clear();
+    }
 
     pando::QueryOptions opts;
     opts.offset    = static_cast<size_t>(std::max(0, offset));
@@ -224,6 +247,7 @@ char* flexicorp_pando_query(
     // are interpreted as whole-token regex unless strict mode is explicitly requested.
     opts.strict_quoted_strings = false;
     opts.attrs     = parse_attrs(attrs);
+    opts.dialect   = dialect;
     std::string context_scope = "s";
     if (const char* env_scope = std::getenv("FLEXICORP_PANDO_CONTEXT_SCOPE")) {
         std::string s(env_scope);
@@ -254,6 +278,7 @@ char* flexicorp_pando_query(
             popts.group_limit = 1000;
             popts.attrs = opts.attrs;
             popts.strict_quoted_strings = false;
+            popts.dialect = dialect;
             // CLI fallback transport for collocation ProgramOptions (daemon JSON path
             // already sets these directly on ProgramOptions).
             auto env_to_int = [](const char* key, int defv) -> int {
@@ -301,10 +326,14 @@ char* flexicorp_pando_query(
             }
             return to_c_str(flexicorp_pando::wrap_program_json_as_flexicorp_response(json, "query"));
         } else {
-            pando::Parser parser(qstr);
-            pando::Program prog = parser.parse();
+            // in the query's own language: the query tokens (groups, highlighting) are the ones it names
+            pando::Program prog = dialect.empty()
+                ? pando::Parser(qstr).parse()
+                : pando::parse_in_dialect(qstr, dialect, pando::ParserOptions{false}, &ctx->corpus);
             const bool is_parallel_query = (!prog.empty() && prog[0].has_query && prog[0].is_parallel);
-            pando::TokenQuery parsed_query = is_parallel_query ? prog[0].query : flexicorp_pando::parse_query_for_groups(query);
+            pando::TokenQuery parsed_query = (is_parallel_query || !dialect.empty())
+                ? (!prog.empty() && prog[0].has_query ? prog[0].query : pando::TokenQuery{})
+                : flexicorp_pando::parse_query_for_groups(query);
             pando::MatchSet ms;
             double elapsed = 0.0;
             bool total_estimated = false;

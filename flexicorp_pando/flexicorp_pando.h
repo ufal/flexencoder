@@ -31,7 +31,8 @@ typedef struct flexicorp_pando_ctx flexicorp_pando_ctx_t;
 // Return the API version (2: flexicorp_pando_request + build_string;
 // 3: build_json, busy, idle_seconds; request runs pando::ServerApi;
 // 4: flexicorp_pando_open_opts — server options: limits by tier, sessions, …;
-// 5: flexicorp_pando_xidx_fragments — TEITOK XML around hits from the project's xidx).
+// 5: flexicorp_pando_xidx_fragments — TEITOK XML around hits from the project's xidx;
+// 6: flexicorp_pando_query_in — a query in another language than pando CQL).
 // Callers can check this to detect breaking changes.
 int flexicorp_pando_api_version(void);
 
@@ -86,6 +87,21 @@ void flexicorp_pando_close(flexicorp_pando_ctx_t* ctx);
 char* flexicorp_pando_query(
     flexicorp_pando_ctx_t* ctx,
     const char* query,
+    int offset,
+    int limit,
+    int max_total,
+    int context,
+    const char* attrs
+);
+
+// As flexicorp_pando_query, in a named query language (api_version 6): "pando-cql" (NULL /
+// "" = the same), "cwb-cql", "manatee-cql", "pmltq", "tiger" (pando's dialects; aliases as pando
+// takes them). pando translates the query; the hits' groups and "query_lang" follow it. An
+// unknown language is an error. No prefix in the query text: the language is named here.
+char* flexicorp_pando_query_in(
+    flexicorp_pando_ctx_t* ctx,
+    const char* query,
+    const char* language,
     int offset,
     int limit,
     int max_total,

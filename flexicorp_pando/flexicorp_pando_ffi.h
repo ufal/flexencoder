@@ -22,6 +22,7 @@ char* flexicorp_pando_query(
     int context,
     const char* attrs
 );
+char* flexicorp_pando_query_in(flexicorp_pando_ctx_t* ctx, const char* query, const char* language, int offset, int limit, int max_total, int context, const char* attrs);
 
 char* flexicorp_pando_info(flexicorp_pando_ctx_t* ctx);
 

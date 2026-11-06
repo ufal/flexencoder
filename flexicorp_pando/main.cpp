@@ -24,6 +24,8 @@ static void usage(const char* prog) {
         "                           If DIR is the bare name \"pando\", CWD is the project root\n"
         "                           (expects ./xidx next to ./pando for XML fragments on hits).\n"
         "  -q, --query QUERY        CQL query string (required, unless --request)\n"
+        "  --cql LANG               The query's language: pando-cql (default), cwb-cql, manatee-cql,\n"
+        "                           pmltq, tiger (pando translates it; groups follow its tokens)\n"
         "  --request PATH           One GET request as pando-server answers it, e.g. \"/context?pos=12&left=40\";\n"
         "                           prints its JSON body (exit 1 on an HTTP error status)\n"
         "  --version                The build as JSON: the adapter's and the linked pando's version and commit\n"
@@ -43,6 +45,7 @@ int main(int argc, char* argv[]) {
     std::string query;
     std::string attrs;
     std::string request;
+    std::string language;
     int offset    = 0;
     int limit     = 50;
     int max_total = 10000;
@@ -67,6 +70,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--context")                context = std::atoi(next());
         else if (arg == "--attrs")                  attrs = next();
         else if (arg == "--request")                request = next();
+        else if (arg == "--cql")                    language = next();
         else if (arg == "--preload")                preload = 1;
         else if (arg == "-h" || arg == "--help")    { usage(argv[0]); return 0; }
         else if (arg == "--version")                { std::printf("%s\n", flexicorp_pando_build_json()); return 0; }
@@ -108,8 +112,8 @@ int main(int argc, char* argv[]) {
         return body && status < 400 ? 0 : 1;
     }
 
-    char* json = flexicorp_pando_query(
-        ctx, query.c_str(), offset, limit, max_total, context,
+    char* json = flexicorp_pando_query_in(
+        ctx, query.c_str(), language.empty() ? nullptr : language.c_str(), offset, limit, max_total, context,
         attrs.empty() ? nullptr : attrs.c_str()
     );
 

@@ -5,6 +5,7 @@
 // Produces JSON in the flexicorp CLI envelope format with per-query-token
 // group spans, so flexicorp.php can render per-token highlight legends.
 
+#include "query/dialect/dialect.h"
 #include "corpus/corpus.h"
 #include "query/executor.h"
 #include "query/parser.h"
@@ -1256,6 +1257,15 @@ inline std::string wrap_program_json_as_flexicorp_response(const std::string& pr
     return out.str();
 }
 
+/// The query's language as TEITOK names it (its query-language ids), from pando's dialect.
+inline std::string query_lang_name(const std::string& dialect) {
+    const std::string d = pando::normalize_dialect(dialect);
+    if (d == "cwb") return "cwb-cql";
+    if (d == "manatee") return "manatee-cql";
+    if (d == "pmltq" || d == "tiger") return d;
+    return "pando-cql";
+}
+
 inline std::string to_flexicorp_json(
     const pando::Corpus& corpus,
     const std::string& query_text,
@@ -1465,7 +1475,7 @@ inline std::string to_flexicorp_json(
         out << "      \"total_exact\": " << (ms.total_exact ? "true" : "false") << ",\n";
         out << "      \"time_ms\": " << elapsed_ms << ",\n";
         out << "      \"query\": " << jstr(query_text) << ",\n";
-        out << "      \"query_lang\": \"pando-cql\",\n";
+        out << "      \"query_lang\": " << jstr(query_lang_name(opts.dialect)) << ",\n";
         out << "      \"pairs\": [\n";
         for (size_t i = start; i < end; ++i) {
             const auto& pr = ms.parallel_matches[i];
@@ -1570,7 +1580,7 @@ inline std::string to_flexicorp_json(
     if (total_estimated) out << "      \"total_estimated\": true,\n";
     out << "      \"time_ms\": " << elapsed_ms << ",\n";
     out << "      \"query\": " << jstr(query_text) << ",\n";
-    out << "      \"query_lang\": \"pando-cql\",\n";
+    out << "      \"query_lang\": " << jstr(query_lang_name(opts.dialect)) << ",\n";
 
     out << "      \"groups\": [";
     for (size_t g = 0; g < group_labels.size(); ++g) {

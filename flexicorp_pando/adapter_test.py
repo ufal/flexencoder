@@ -6,6 +6,7 @@ lib.flexicorp_pando_build_string.restype=S; lib.flexicorp_pando_build_json.resty
 lib.flexicorp_pando_open.restype=V; lib.flexicorp_pando_open.argtypes=[S,S,ctypes.c_int]
 lib.flexicorp_pando_request.restype=V; lib.flexicorp_pando_request.argtypes=[V,S,S,S,S,ctypes.POINTER(ctypes.c_int)]
 lib.flexicorp_pando_query.restype=V; lib.flexicorp_pando_query.argtypes=[V,S,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,S]
+lib.flexicorp_pando_query_in.restype=V; lib.flexicorp_pando_query_in.argtypes=[V,S,S,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,S]
 lib.flexicorp_pando_busy.restype=ctypes.c_size_t; lib.flexicorp_pando_busy.argtypes=[V]
 lib.flexicorp_pando_idle_seconds.restype=ctypes.c_double; lib.flexicorp_pando_idle_seconds.argtypes=[V]
 lib.flexicorp_pando_free.argtypes=[V]; lib.flexicorp_pando_close.argtypes=[V]
@@ -17,7 +18,7 @@ def req(h,m,p,q=None,b=None):
     st=ctypes.c_int(0)
     r=lib.flexicorp_pando_request(h,m.encode(),p.encode(),q.encode() if q else None,json.dumps(b).encode() if b is not None else None,ctypes.byref(st))
     t=ctypes.string_at(r).decode(); lib.flexicorp_pando_free(r); return st.value,json.loads(t)
-check(lib.flexicorp_pando_api_version()==3,"api 3")
+check(lib.flexicorp_pando_api_version()>=6,"api 6 (query_in)")
 bj=json.loads(lib.flexicorp_pando_build_json()); print("build", bj["build_string"])
 h=lib.flexicorp_pando_open(None,corpus.encode(),0); check(h,"open")
 st,hh=req(h,"GET","/health"); check(st==200 and hh.get("embedded_in")=="flexicorp_pando","health")
@@ -35,6 +36,14 @@ st,r=req(h,"POST","/query",b={"query":'[] [] []',"total":True,"timeout_ms":1}); 
 p=lib.flexicorp_pando_query(h,b'[lemma="house"]',0,3,0,5,None); legacy=json.loads(ctypes.string_at(p)); lib.flexicorp_pando_free(p)
 check(legacy.get("success") is True,"legacy query envelope")
 p=lib.flexicorp_pando_query(h,b'[upos="NOUN"]; count by upos;',0,3,0,5,None); legacy=json.loads(ctypes.string_at(p)); lib.flexicorp_pando_free(p)
+# a query in another language (--cql): pando translates it, query_lang says which, a prefix is not read here
+def qin(q,lang):
+    p=lib.flexicorp_pando_query_in(h,q.encode(),lang.encode() if lang else None,0,3,0,5,None); r=json.loads(ctypes.string_at(p)); lib.flexicorp_pando_free(p); return r["done"]
+d=qin('[upos="NOUN"]',None); check(d["result"]["query_lang"]=="pando-cql","query_in default pando-cql")
+for lang in ("cwb-cql","manatee-cql"):
+    d2=qin('[upos="NOUN"]',lang); check(d2["result"]["query_lang"]==lang and d2["result"]["total"]==d["result"]["total"],"query_in "+lang)
+d=qin('[upos="NOUN"]',"klingon"); check(d["errors"] and "unknown query language" in d["errors"][0],"query_in unknown language")
+d=qin('PMLTQ a-node [ upos = "NOUN" ]',"pmltq"); check(d["errors"],"query_in: no prefix")
 check(legacy.get("success") is True,"legacy program")
 # concurrency: 8 threads x mixed requests, compare to baseline
 reqs=[("POST","/query",None,{"query":'a:[upos="VERB"] > b:[upos="NOUN"]',"limit":5,"total":True}),

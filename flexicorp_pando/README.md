@@ -65,6 +65,16 @@ Do not rely on a stale `/usr/local/bin/flexicorp-pando` that was built on anothe
 ./flexicorp-pando -p /path/to/teitok/project -q '[upos="VERB"]' --offset 10 --limit 50
 ```
 
+A query in another language than pando CQL names it with `--cql` (`flexicorp_pando_query_in` in the
+library, API version 6): `cwb-cql`, `manatee-cql`, `pmltq`, `tiger`. pando translates the query; the
+hits' groups follow its tokens (PML-TQ nodes keep their names, `n1`, `n2`, … in written order when
+none is named) and `query_lang` says which language it was. There is no prefix in the query text
+(`PMLTQ …`): that shortcut is FQS's; here the language is always named.
+
+```
+./flexicorp-pando -p /path/to/teitok/project --cql pmltq -q 'a-node [ upos = "VERB", child a-node [ deprel = "obj" ] ]'
+```
+
 ## TEITOK
 
 flexicorp's TEITOK UI (`flexicorp.php`) sends pando queries through FQS when FQS is ready for
