@@ -1,0 +1,2 @@
+<TEI><teiHeader/>
+<text><s id="s-1"><tok id="w-1">A</tok> <tok id="w-2" form="--">x</tok> <tok id="w-3" head="w-1">B</tok></s><pb n="2"/> <s id="s-2"><tok id="w-4" head="w-3">C</tok></s></text></TEI>

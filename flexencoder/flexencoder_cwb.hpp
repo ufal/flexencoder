@@ -46,7 +46,8 @@ private:
     uint32_t text_id_range_idx_{0};
     std::string current_doc_path_;
     std::vector<std::map<std::string, std::string>> id_refs_;
-    std::set<std::uint64_t> doc_skipped_positions_;
+    // corpus positions (0-based, deleted `--` tokens left out) of flexencoder's 1-based global positions
+    IndexPosMap pos_;
 
     void ensure_lexicon(const std::string& formkey, const std::string& formval, bool avs_style);
     void write_range_value(const std::string& tagname, const std::string& attname,

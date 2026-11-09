@@ -159,8 +159,11 @@ struct FlexRegion {
     std::string id;        // @id if present
     std::string type;      // "s", "text", "name", ...
     std::uint64_t seq_id{0};
-    std::uint64_t start_pos{0};
-    std::uint64_t end_pos{0};
+    std::uint64_t start_pos{0};   // global_pos (1-based) of the first token
+    std::uint64_t end_pos{0};     // global_pos (1-based) of the last token
+    /** An element with no tokens of its own (an `empty` sattribute without a token list), placed on the token
+     *  before it: zero width, which backends without zero-width regions (CWB) leave out. */
+    bool zero_width{false};
     std::map<std::string, std::string> attrs;
     std::uint64_t xml_start{0};
     std::uint64_t xml_end{0};

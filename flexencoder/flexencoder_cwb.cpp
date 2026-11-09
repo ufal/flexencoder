@@ -258,7 +258,7 @@ void CwbWriter::begin_document(const FlexDocumentMeta& doc) {
     if (!initialized_) return;
     current_doc_path_ = doc.path;
     id_refs_.clear();
-    doc_skipped_positions_.clear();
+    pos_.begin_document();
 
     ensure_lexicon("text_id", doc.path, true);
     current_text_id_index_ = lexidx_["text_id"] - 1;
@@ -268,9 +268,10 @@ void CwbWriter::add_token(const FlexToken& tok) {
     if (!initialized_) return;
     // TEITOK's deleted token (@form="--"); a `--` in the text is a real dash
     if (tok.deleted && tok.tok_id != "w-empty") {
-        doc_skipped_positions_.insert(tok.global_pos);
+        pos_.add_token(tok.global_pos, true);
         return;
     }
+    pos_.add_token(tok.global_pos, false);
     std::map<std::string, std::string> id_vals;
     for (const auto& pa : pattrs_) {
         auto it = tok.attrs.find(pa.key);
@@ -298,17 +299,16 @@ void CwbWriter::add_token(const FlexToken& tok) {
 void CwbWriter::add_region(const FlexRegion& reg) {
     if (!initialized_) return;
     std::string t = reg.type;
-    std::uint64_t ep1 = reg.start_pos;
-    std::uint64_t ep2 = reg.end_pos;
-    if (ep2 < ep1) return;
-    if (ep1 == ep2 && t != "text") return;
-    uint32_t p1 = static_cast<uint32_t>(ep1);
-    uint32_t p2 = static_cast<uint32_t>(ep2);
-    for (std::uint64_t p : doc_skipped_positions_) {
-        if (p <= ep1) --p1;
-        if (p <= ep2) --p2;
-    }
-    if (p2 < p1) return;
+    // CWB has no zero-width regions (an empty element placed on the token before it); a region of one token
+    // is an ordinary region, as in tt-cwb-encode
+    if (reg.zero_width || reg.start_pos == 0 || reg.end_pos < reg.start_pos) return;
+    // all tokens of the document came before its regions: their 1-based global positions map to corpus
+    // positions (0-based, deleted tokens left out, counted on from the earlier documents)
+    const std::uint64_t is = pos_.start_of(reg.start_pos);
+    const std::uint64_t ie = pos_.end_of(reg.end_pos);
+    if (ie < is) return;   // deleted tokens only
+    uint32_t p1 = static_cast<uint32_t>(is - 1);
+    uint32_t p2 = static_cast<uint32_t>(ie - 1);
 
     if (files_[t]["rng"]) {
         flexencoder::write_network_int(p1, files_[t]["rng"]);
@@ -376,7 +376,8 @@ void CwbWriter::end_document(const FlexDocumentMeta& doc) {
             int32_t refpos = -1;
             if (!refid.empty()) {
                 auto ip = id_pos.find(refid);
-                if (ip != id_pos.end()) refpos = static_cast<int32_t>(ip->second);
+                if (ip != id_pos.end() && pos_.start_of(ip->second) == pos_.end_of(ip->second))   // not deleted
+                    refpos = static_cast<int32_t>(pos_.start_of(ip->second) - 1);
             }
             flexencoder::write_network_int(static_cast<uint32_t>(refpos), files_[pa.key]["pos"]);
         }

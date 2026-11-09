@@ -1631,6 +1631,7 @@ void FlexExtractor::treat_file(
                         }
                     }
                 }
+                bool zero_width = false;
                 if (posa == 0 && posb == 0) {
                     pugi::xpath_node prev_tok = el.select_node("preceding::tok[1]");
                     if (!prev_tok.node()) prev_tok = el.select_node("preceding::dtok[1]");
@@ -1643,6 +1644,7 @@ void FlexExtractor::treat_file(
                     }
                     if (pos == 0) continue;
                     posa = posb = pos;
+                    zero_width = true;
                 }
                 dry_note_span(sa.key, posa, posb);
                 FlexRegion reg;
@@ -1652,6 +1654,7 @@ void FlexExtractor::treat_file(
                 if (reg.id.empty()) reg.id = el.attribute("xml:id").value();
                 reg.start_pos = posa;
                 reg.end_pos = posb;
+                reg.zero_width = zero_width;
                 for (auto att = el.attributes_begin(); att != el.attributes_end(); ++att) {
                     const std::string aname = att->name();
                     if (aname == sa.corpid_attr_) continue;

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ttsettings>
+  <cqp corpus="CWBREGIONS">
+    <pattributes>
+      <item key="word"/>
+      <item key="head" type="id"/>
+    </pattributes>
+    <sattributes>
+      <item key="text" level="text"/>
+      <item key="s" level="s"/>
+      <item key="pb" level="pb" type="empty"/>
+    </sattributes>
+  </cqp>
+</ttsettings>
