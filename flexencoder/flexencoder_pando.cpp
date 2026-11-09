@@ -472,8 +472,12 @@ void PandoEventsWriter::write_sentence_block(const FlexRegion& sent_reg) {
     const std::uint64_t start0 = (sent_reg.start_pos > 0 ? sent_reg.start_pos - 1 : 0);
     const std::uint64_t end0 = (sent_reg.end_pos > 0 ? sent_reg.end_pos - 1 : 0);
 
-    // Emit tokens for this sentence block.
-    for (const auto& tok : doc_tokens_) {
+    // Emit tokens for this sentence block, from its first token on (tokens come in ascending
+    // global position; a scan from the document's start made this quadratic per document)
+    const auto first = std::lower_bound(doc_tokens_.begin(), doc_tokens_.end(), start0 + 1,
+        [](const FlexToken& t, std::uint64_t g) { return t.global_pos < g; });
+    for (auto it = first; it != doc_tokens_.end(); ++it) {
+        const FlexToken& tok = *it;
         if (tok.tok_id == "w-empty") continue;
         if (tok.global_pos <= 0) continue;
         std::uint64_t tok0 = tok.global_pos - 1;

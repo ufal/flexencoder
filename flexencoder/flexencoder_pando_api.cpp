@@ -17,6 +17,7 @@
 #ifdef USE_PANDO_API
 #include "flexencoder_helpers.hpp"  // trim, etc.
 #include "flexencoder_build_id.hpp"
+#include "flexencoder_doc_sentences.hpp"
 
 static std::string normalize_multivalue_with_sep(const std::string& v, const std::string& sep) {
     if (v.empty() || sep.empty() || sep == "|") return v;
@@ -167,35 +168,28 @@ void PandoApiWriter::add_relation(const FlexRelation& rel) {
 
 void PandoApiWriter::flush_document() {
 #ifdef USE_PANDO_API
-    // Sentence spans from s/seg regions (same logic as ClickHouse writer)
-    std::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> sentence_span;
-    std::uint64_t sent_id = 0;
-    for (const auto& br : doc_regions_) {
-        if (br.reg.type != sentence_region_type_ && br.reg.type != "s") continue;
-        ++sent_id;
-        sentence_span[sent_id] = {br.reg.start_pos, br.reg.end_pos};
+    std::vector<std::uint64_t> globals;
+    std::vector<std::string> tok_ids;
+    globals.reserve(doc_tokens_.size());
+    tok_ids.reserve(doc_tokens_.size());
+    for (const auto& bt : doc_tokens_) {
+        globals.push_back(bt.tok.global_pos);
+        tok_ids.push_back(bt.tok.tok_id);
     }
 
-    // Per-sentence: tok_id -> local index (0-based)
-    std::map<std::uint64_t, std::map<std::string, int>> sent_tok_id_to_local;
-    for (const auto& sp : sentence_span) {
-        std::map<std::string, int> local;
-        int idx = 0;
-        for (size_t i = 0; i < doc_tokens_.size(); ++i) {
-            std::uint64_t gp = doc_tokens_[i].tok.global_pos;
-            if (gp >= sp.second.first && gp <= sp.second.second)
-                local[doc_tokens_[i].tok.tok_id] = idx++;
-        }
-        sent_tok_id_to_local[sp.first] = std::move(local);
-    }
+    // Sentence spans from s/seg regions (same logic as ClickHouse writer): which sentence a
+    // token is in and the place of a head's token id there (flexencoder_doc_sentences.hpp)
+    std::vector<DocSentences::Span> sentence_spans;
+    for (const auto& br : doc_regions_)
+        if (br.reg.type == sentence_region_type_ || br.reg.type == "s")
+            sentence_spans.emplace_back(br.reg.start_pos, br.reg.end_pos);
+    DocSentences doc_sentences(globals, tok_ids, std::move(sentence_spans));
 
     // The tokens the builder gets (in a sentence, when the document has sentences, as the
     // pando-index route has it) and their positions, in which region bounds are given;
     // xidx numbers them the same way (XidxWriter).
     std::vector<bool> in_index;
     {
-        std::vector<std::uint64_t> globals;
-        for (const auto& bt : doc_tokens_) globals.push_back(bt.tok.global_pos);
         std::vector<FlexRegion> sents;
         for (const auto& br : doc_regions_)
             if (br.reg.type == sentence_region_type_ || flexregion_is_sentence_like(br.reg, cfg_snapshot_)) {
@@ -211,15 +205,7 @@ void PandoApiWriter::flush_document() {
     for (size_t i = 0; i < doc_tokens_.size(); ++i) {
         const auto& bt = doc_tokens_[i];
         if (!in_index[i]) continue;
-        std::uint64_t global_pos = bt.tok.global_pos;
-
-        std::uint64_t sentence_id = 0;
-        for (const auto& sp : sentence_span) {
-            if (global_pos >= sp.second.first && global_pos <= sp.second.second) {
-                sentence_id = sp.first;
-                break;
-            }
-        }
+        const std::uint64_t sentence_id = doc_sentences.sentence_of(i);
 
         if (sentence_id != current_sent_id) {
             if (current_sent_id != 0)
@@ -246,11 +232,10 @@ void PandoApiWriter::flush_document() {
 
         int sentence_head_id = -1;
         if (sentence_id != 0) {
-            auto& local_map = sent_tok_id_to_local[sentence_id];
             if (!bt.head_tok_id.empty() && bt.head_tok_id != "0") {
-                auto it = local_map.find(bt.head_tok_id);
-                if (it != local_map.end())
-                    sentence_head_id = it->second + 1;  // 1-based
+                const int local = doc_sentences.local_index(sentence_id, bt.head_tok_id);
+                if (local >= 0)
+                    sentence_head_id = local + 1;  // 1-based
                 else
                     sentence_head_id = 0;  // root
             } else {
