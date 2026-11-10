@@ -1118,6 +1118,14 @@ inline PandoFragmentEmitPolicy resolve_pando_fragment_emit_policy(
         ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
     }
     pol.context_scope = context_scope;
+    // KWIC token window: the XML of the match +/- the context tokens (xml byte span of those
+    // tokens), as CQP's --flexicorp-fragment-kwic-cpos-span gives it. There is no "window"
+    // region in xidx, so without this the lookup degrades to the matched <tok> alone.
+    if (context_scope == "window") {
+        pol.include_xidx_fragment = extract_fragments_requested;
+        pol.use_kwic_token_xml_span = extract_fragments_requested;
+        return pol;
+    }
     if (context_scope != "s") {
         pol.include_xidx_fragment = extract_fragments_requested;
         return pol;
