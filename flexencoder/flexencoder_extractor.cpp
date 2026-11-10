@@ -482,14 +482,21 @@ inline void append_ref_ids_from_toklist_string(const std::string& wlist, std::ve
 // Min/max corpus_pos over referenced token ids, or (0,0) if any id missing.
 inline std::pair<std::uint64_t, std::uint64_t> pos_span_from_tok_ref_ids(
     const std::vector<std::string>& ref_ids,
-    const std::map<std::string, std::uint64_t>& id_pos
+    const std::map<std::string, std::uint64_t>& id_pos,
+    const std::map<std::string, std::pair<std::uint64_t, std::uint64_t>>* tok_spans = nullptr
 ) {
     std::uint64_t mn = 0, mx = 0;
     for (const auto& rid : ref_ids) {
         auto it = id_pos.find(rid);
         if (it == id_pos.end()) return {0, 0};
         if (mn == 0 || it->second < mn) mn = it->second;
-        if (it->second > mx) mx = it->second;
+        // a <tok> split into <dtok>s reaches to its last part
+        std::uint64_t last = it->second;
+        if (tok_spans) {
+            auto sp = tok_spans->find(rid);
+            if (sp != tok_spans->end()) last = sp->second.second;
+        }
+        if (last > mx) mx = last;
     }
     if (mn == 0 || mx == 0) return {0, 0};
     return {mn, mx};
@@ -1624,7 +1631,7 @@ void FlexExtractor::treat_file(
                     std::vector<std::string> ref_ids;
                     append_ref_ids_from_toklist_string(wlist, &ref_ids);
                     if (!ref_ids.empty()) {
-                        auto span = pos_span_from_tok_ref_ids(ref_ids, id_pos);
+                        auto span = pos_span_from_tok_ref_ids(ref_ids, id_pos, &tok_span_map);
                         if (span.first && span.second) {
                             posa = span.first;
                             posb = span.second;
@@ -1720,7 +1727,7 @@ void FlexExtractor::treat_file(
                     std::vector<std::string> ref_ids;
                     append_ref_ids_from_toklist_string(wlist, &ref_ids);
                     if (!ref_ids.empty()) {
-                        auto span = pos_span_from_tok_ref_ids(ref_ids, id_pos);
+                        auto span = pos_span_from_tok_ref_ids(ref_ids, id_pos, &tok_span_map);
                         if (span.first && span.second) {
                             posa = span.first;
                             posb = span.second;
@@ -1769,7 +1776,10 @@ void FlexExtractor::treat_file(
                     }
                     if (id_pos.find(toka) == id_pos.end() || id_pos.find(tokb) == id_pos.end()) continue;
                     posa = id_pos[toka];
-                    posb = id_pos[tokb];
+                    // a <tok> split into <dtok>s has its first part's position in id_pos: the
+                    // region ends at its last part (else a sentence-final multiword token's
+                    // later parts fall outside the sentence, and the pando writer drops them)
+                    posb = tok_span_map.count(tokb) ? tok_span_map[tokb].second : id_pos[tokb];
                 }
             }
 

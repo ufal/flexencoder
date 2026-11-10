@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI><text>
+<s id="s1"><tok id="w-1">one</tok> <tok id="w-2">twothree<dtok id="d-2-1" form="two"/><dtok id="d-2-2" form="three"/></tok></s>
+<s id="s2"><tok id="w-3">fourfive<dtok id="d-3-1" form="four"/><dtok id="d-3-2" form="five"/></tok> <tok id="w-4">six</tok></s>
+<s id="s3" sameAs="#w-5 #w-6"/><tok id="w-5">seven</tok> <tok id="w-6">eightnine<dtok id="d-6-1" form="eight"/><dtok id="d-6-2" form="nine"/></tok>
+</text></TEI>

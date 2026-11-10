@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ttsettings>
+  <cqp corpus="DTOKEND">
+    <pattributes>
+      <item key="word"/>
+    </pattributes>
+    <sattributes>
+      <item key="text" level="text"/>
+      <item key="s" level="s"/>
+    </sattributes>
+  </cqp>
+</ttsettings>
