@@ -1224,6 +1224,101 @@ inline std::string extract_scope_tuid_from_xml_open_tags(const std::string& frag
     return best;
 }
 
+/**
+ * Make a byte slice of TEITOK XML well formed. A KWIC window (the xml of the tokens from match - N
+ * to match + N) is cut wherever those tokens are, so it can start inside elements it does not
+ * open (the `</s>` of the sentence the window starts in) and end inside elements it does not
+ * close (the `<s>` the window ends in). Closing tags without their start get a bare start tag in
+ * front (outermost first), elements still open at the end are closed (innermost first). Comments,
+ * CDATA, processing instructions and empty-element tags are skipped; `>` inside a quoted
+ * attribute value does not end a tag. A well-formed slice (a whole region) is left as it is.
+ */
+inline std::string balance_xml_fragment(const std::string& xml) {
+    auto is_name_char = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.' || c == ':'
+            || static_cast<unsigned char>(c) >= 0x80;
+    };
+    std::vector<std::string> open;       // elements opened in the slice, still open
+    std::vector<std::string> orphans;    // closing tags whose start lies before the slice, in order
+    const size_t n = xml.size();
+    size_t i = 0;
+    while (i < n) {
+        const size_t lt = xml.find('<', i);
+        if (lt == std::string::npos) break;
+        if (xml.compare(lt, 4, "<!--") == 0) {
+            const size_t e = xml.find("-->", lt + 4);
+            if (e == std::string::npos) break;
+            i = e + 3;
+            continue;
+        }
+        if (xml.compare(lt, 9, "<![CDATA[") == 0) {
+            const size_t e = xml.find("]]>", lt + 9);
+            if (e == std::string::npos) break;
+            i = e + 3;
+            continue;
+        }
+        if (lt + 1 < n && (xml[lt + 1] == '?' || xml[lt + 1] == '!')) {
+            const size_t e = xml.find('>', lt + 2);
+            if (e == std::string::npos) break;
+            i = e + 1;
+            continue;
+        }
+        // the tag's end: the first '>' outside a quoted attribute value
+        size_t gt = std::string::npos;
+        char quote = 0;
+        for (size_t k = lt + 1; k < n; ++k) {
+            const char c = xml[k];
+            if (quote) {
+                if (c == quote) quote = 0;
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '>') {
+                gt = k;
+                break;
+            }
+        }
+        if (gt == std::string::npos) break;   // a partial tag at the end (sanitize cuts it off)
+        const bool closing = lt + 1 < n && xml[lt + 1] == '/';
+        size_t ns = lt + (closing ? 2 : 1);
+        size_t ne = ns;
+        while (ne < gt && is_name_char(xml[ne])) ++ne;
+        const std::string name = xml.substr(ns, ne - ns);
+        if (!name.empty()) {
+            if (closing) {
+                if (!open.empty() && open.back() == name) {
+                    open.pop_back();
+                } else {
+                    // its start lies before the slice; elements opened in the slice inside it are
+                    // closed by it too (source XML is well formed, so this only happens for a
+                    // mismatch in the source; keep what we have consistent)
+                    bool found = false;
+                    for (size_t d = open.size(); d-- > 0;) {
+                        if (open[d] == name) { found = true; break; }
+                    }
+                    if (found) {
+                        while (!open.empty() && open.back() != name) open.pop_back();
+                        if (!open.empty()) open.pop_back();
+                    } else if (open.empty()) {
+                        orphans.push_back(name);
+                    }
+                }
+            } else {
+                size_t b = gt;
+                while (b > lt && (xml[b - 1] == ' ' || xml[b - 1] == '\t' || xml[b - 1] == '\n' || xml[b - 1] == '\r')) --b;
+                const bool empty_elem = b > lt && xml[b - 1] == '/';
+                if (!empty_elem) open.push_back(name);
+            }
+        }
+        i = gt + 1;
+    }
+    if (orphans.empty() && open.empty()) return xml;
+    std::string out;
+    for (size_t k = orphans.size(); k-- > 0;) out += "<" + orphans[k] + ">";
+    out += xml;
+    for (size_t k = open.size(); k-- > 0;) out += "</" + open[k] + ">";
+    return out;
+}
+
 inline std::string sanitize_xml_fragment_edges(const std::string& xml) {
     if (xml.empty()) return xml;
     std::string out = xml;
@@ -1238,7 +1333,8 @@ inline std::string sanitize_xml_fragment_edges(const std::string& xml) {
     while (!out.empty() && (out.back() == ' ' || out.back() == '\n' || out.back() == '\r' || out.back() == '\t')) {
         out.pop_back();
     }
-    return out;
+    // A KWIC window cuts through elements: open and close them so the fragment parses as XML.
+    return balance_xml_fragment(out);
 }
 
 /**
