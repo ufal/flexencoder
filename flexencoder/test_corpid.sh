@@ -64,7 +64,9 @@ for doc in docs:
 adj = by_stem.get("merge_adjacent", [])
 assert len(adj) == 1, f"merge_adjacent: expected one p region, got {adj}"
 r = adj[0]
-assert r["start_pos"] == 2 and r["end_pos"] == 5, f"adjacent envelope wrong: {r}"
+# the files are read in sorted order (merge_adjacent, merge_gap, no_corpid) and positions run on across
+# them: merge_adjacent has 4 tokens (0..3), merge_gap 5 (4..8)
+assert r["start_pos"] == 0 and r["end_pos"] == 3, f"adjacent envelope wrong: {r}"
 assert r["attrs"]["id"] == "p-1"
 frag = r["attrs"].get("fragment_id", "")
 assert "p-1a" in frag and "p-1b" in frag, f"fragment_id: {frag!r}"
@@ -76,9 +78,9 @@ assert ids == {"p-a", "p-b"}, f"no_corpid regions: {ids}"
 gap = by_stem.get("merge_gap", [])
 p1 = [r for r in gap if r["attrs"].get("id") == "p-1"]
 assert len(p1) == 1, f"merge_gap p-1: {p1}"
-assert p1[0]["start_pos"] == 6 and p1[0]["end_pos"] == 10, f"gap envelope: {p1[0]}"
+assert p1[0]["start_pos"] == 4 and p1[0]["end_pos"] == 8, f"gap envelope: {p1[0]}"
 pmid = [r for r in gap if r["attrs"].get("id") == "p-mid"]
-assert len(pmid) == 1 and pmid[0]["start_pos"] == 8
+assert len(pmid) == 1 and pmid[0]["start_pos"] == 6
 
 dry = json.loads(dry_path.read_text(encoding="utf-8"))
 hints = dry.get("corpid_hints", {})

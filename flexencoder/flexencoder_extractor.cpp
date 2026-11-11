@@ -590,11 +590,16 @@ static void collect_xml_files_for_root(const fs::path& xml_root, std::vector<fs:
     if (!fs::exists(xml_root, ec) || !fs::is_directory(xml_root)) return;
     try {
         const auto dir_opts = fs::directory_options::skip_permission_denied;
+        const size_t first = out->size();
         for (const auto& entry : fs::recursive_directory_iterator(xml_root, dir_opts)) {
             if (!entry.is_regular_file()) continue;
             if (entry.path().extension() != ".xml") continue;
             out->push_back(entry.path());
         }
+        // Directory order differs between file systems (macOS lists alphabetically, Linux in hash
+        // order), and token positions run on across the files: sort, so that the same files give the
+        // same positions on every machine. (An index file above keeps its own order.)
+        std::sort(out->begin() + first, out->end());
     } catch (const fs::filesystem_error&) {
     }
 }
